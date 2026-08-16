@@ -17,8 +17,9 @@
 //!     with its own derivation step (`midn_core::kdf::derive_res_star`) —
 //!     the network computes XRES* itself rather than trusting a value the
 //!     UE never has to reproduce.
-//!   - RegistrationAccept goes out via `DownlinkNasTransport`, not
-//!     `InitialContextSetupRequest` — see "Phase A vs Phase B" below.
+//!   - RegistrationAccept goes out via `DownlinkNasTransport` in Phase A
+//!     mode, `InitialContextSetupRequest` (with a bundled default PDU
+//!     session) in Phase B mode — see "Phase A vs Phase B" below.
 //!
 //! ## AUSF/UDM simplification
 //!
@@ -38,17 +39,39 @@
 //!
 //! ## Phase A vs Phase B
 //!
-//! `ngap::messages` module doc already flagged this split before this
-//! increment existed: `InitialContextSetupRequest`/`Response` field names
-//! were pre-shaped for "Phase B, next increment." This increment (Phase A)
-//! sends RegistrationAccept via `DownlinkNasTransport` — no PDU session, no
-//! TEID, no UPF interaction, matching this module's own doc ("PDU Session
-//! Establishment is separate from Registration") and matching NGAP codec
-//! support (`InitialContextSetupRequest` has no PER codec yet — see
-//! `ngap::codec` module doc). Phase B adds the ICSR-based variant once
-//! that codec support exists — same two-step sequencing `mme` itself went
-//! through (Phase 2 `DownlinkNasTransport`-only, then Phase 3
-//! `InitialContextSetupRequest` + TEID/UPF).
+//! `ngap::messages` module doc already flagged this split before Phase A
+//! existed: `InitialContextSetupRequest`/`Response` field names were
+//! pre-shaped for "Phase B, next increment." Same two-mode split `mme`
+//! itself went through (Phase 2 `DownlinkNasTransport`-only, then Phase 3
+//! `InitialContextSetupRequest` + TEID/UPF) — `Amf::with_phase_b(upf_addr)`
+//! mirrors `Mme::with_phase3(upf_addr)` exactly, same builder shape.
+//!
+//! **Correction to an earlier handover note**: Phase B was previously
+//! recorded as "blocked on NGAP codec support for InitialContextSetupRequest
+//! /Response." Checked this session against actual source before writing
+//! anything — that's not accurate. `Amf::process_ngap` (like
+//! `Mme::process_s1ap`) dispatches on the `NgapMessage` *enum* directly, not
+//! wire bytes; `ngap::codec::encode_ngap_pdu`/`decode_ngap_pdu` is a
+//! separate layer only exercised for actual PER round-trips, which nothing
+//! in this simulation's internal message passing goes through yet (no SCTP
+//! transport exists — that's roadmap item 5, still genuinely open). Proof
+//! this was never a real blocker: `s1ap::codec` has the identical gap
+//! (`InitialContextSetupRequest`/`Response` — no PER codec, same module-doc
+//! wording as `ngap::codec`) and LTE's Phase 3 has shipped and passed CI for
+//! multiple sessions regardless, because `mme::attach`/`state_machine` also
+//! only ever touch the `S1apMessage` enum. `ngap::codec` PER support for
+//! ICSR remains a real, separate gap — needed once SCTP wiring is real, not
+//! for this increment.
+//!
+//! In Phase B mode, RegistrationAccept's NAS body is unchanged from Phase A
+//! (registration_result + GUTI + TAI list only) — real 5GS deliberately
+//! keeps PDU Session Establishment as a separate 5GSM procedure from
+//! Registration (5GMM), unlike LTE where AttachAccept legitimately carries
+//! ESM/PDN info inline as part of a real combined procedure. The bundled
+//! default PDU session lives entirely at the NGAP layer, in
+//! `NgapInitialContextSetupRequest::pdu_sessions` — exactly what that
+//! struct's field was already shaped for. No new 5GSM NAS message type
+//! (`PduSessionEstablishmentAccept` etc.) is introduced by this increment.
 //!
 //! ## Step mapping
 //!
@@ -60,6 +83,12 @@
 //! | 4    | UplinkNas(SecurityModeComplete)    | `handle_security_mode_complete` |
 //! | 5    | UplinkNas(RegistrationComplete)    | `handle_registration_complete`  |
 //!
+//! Every handler returns `(Vec<NgapMessage>, Vec<N3Event>)` — same uniform
+//! shape as `mme::attach`'s handlers, even the steps (everything except
+//! `handle_security_mode_complete`) that never actually produce an
+//! `N3Event`. Keeps `Amf::process_ngap`'s dispatch flat, same reason
+//! `mme::state_machine`'s doc gives.
+//!
 //! Tests live in `amf::state_machine`, not here — same split `mme` uses
 //! (drive the flow through `Amf::process_ngap`/`Mme::process_s1ap`, not by
 //! calling these free functions in isolation).
@@ -69,11 +98,18 @@ use midn_proto::nas5gs::{
     encode_registration_accept, encode_sec_mode_cmd, Nas5gsPdu, Nas5gsSecurityContext,
     IDTYPE_SUCI, NAS5GS_SHT_INTEGRITY_CIPHERED,
 };
-use midn_proto::ngap::messages::{NgapDownlinkNasTransport, NgapMessage};
+use midn_proto::ngap::messages::{
+    NgapDownlinkNasTransport, NgapInitialContextSetupRequest, NgapMessage, PduSessionToSetup,
+};
 
+use crate::amf::state_machine::N3Event;
 use crate::hss::Hss;
 use crate::kdf::{derive_kamf, derive_kausf, derive_kseaf, derive_res_star, serving_network_name};
-use midn_ecs::{AuthFailReason, AuthState, IdentityComponent, ImsiRegistry, Nas5gsAkaContext, World};
+use crate::mme::TeidAllocator;
+use midn_ecs::{
+    AuthFailReason, AuthState, IdentityComponent, ImsiRegistry, Nas5gsAkaContext, TunnelComponent,
+    World,
+};
 
 // ── constants ────────────────────────────────────────────────────────────────
 
@@ -94,6 +130,23 @@ const SELECTED_NAS_INTEGRITY_ALG: u8 = 2;
 /// Default ABBA parameter — TS 24.501/33.501's own default value, used
 /// whenever there's no real anti-bidding-down feature set to bind.
 const DEFAULT_ABBA: [u8; 2] = [0x00, 0x00];
+
+/// PDU Session ID this simulation always bundles in Phase B mode — same
+/// "exactly one default session/bearer per successful procedure, no
+/// separate establishment-request decode" simplification
+/// `mme::attach::handle_security_mode_complete`'s Phase 3 branch already
+/// makes for LTE's default EPS bearer. TS 24.501 PDU Session IDs run 1-15;
+/// 1 is as good a fixed default as any here.
+const DEFAULT_PDU_SESSION_ID: u8 = 1;
+
+/// QoS Flow Identifier for the bundled default session. Deliberately NOT
+/// modeled on LTE's `qci: 9` choice in `mme::attach` — QCI 9 is a real,
+/// standardized "default bearer, best-effort internet" value in TS 23.203's
+/// QCI characteristics table, but QFI carries no equivalent standardized
+/// meaning of its own (5QI does that job in 5G, and this simulation doesn't
+/// model 5QI at all yet) — QFI is just a per-session/flow label the SMF
+/// picks. 1 is a plain "first flow" label, not a claim of spec meaning.
+const DEFAULT_QFI: u8 = 1;
 
 // ── Error type (mirrors mme::attach::AttachError) ───────────────────────────
 
@@ -194,20 +247,20 @@ pub fn start_registration(
     ran_ue_ngap_id: u32,
     nas_pdu: &[u8],
     tai: [u8; 6],
-) -> Vec<NgapMessage> {
+) -> (Vec<NgapMessage>, Vec<N3Event>) {
     let plmn = [tai[0], tai[1], tai[2]];
 
     let guti = match decode_nas5gs(nas_pdu) {
         Ok(Nas5gsPdu::RegistrationRequest(inner)) => inner.guti,
         _ => {
             tracing::warn!("start_registration: NAS decode failed or wrong PDU type");
-            return vec![];
+            return (vec![], vec![]);
         }
     };
 
     if guti.is_some() {
         tracing::warn!("start_registration: GUTI-based re-registration not supported (no SUCI on the wire)");
-        return vec![];
+        return (vec![], vec![]);
     }
 
     // Spawn now — IMSI isn't known yet, but amf_ue_ngap_id (== the entity
@@ -232,7 +285,7 @@ pub fn start_registration(
         ran_ue_ngap_id,
         nas_pdu: nas,
     });
-    vec![dl]
+    (vec![dl], vec![])
 }
 
 // ── Step 2: IdentityResponse ─────────────────────────────────────────────────
@@ -246,18 +299,18 @@ pub fn handle_identity_response(
     ran_ue_ngap_id: u32,
     amf_ue_ngap_id: u32,
     nas_pdu: &[u8],
-) -> Vec<NgapMessage> {
+) -> (Vec<NgapMessage>, Vec<N3Event>) {
     let suci = match decode_nas5gs(nas_pdu) {
         Ok(Nas5gsPdu::IdentityResponse(inner)) => match inner.suci {
             Some(suci) => suci,
             None => {
                 tracing::warn!("handle_identity_response: no SUCI in IdentityResponse (GUTI/PEI identity not supported here)");
-                return vec![];
+                return (vec![], vec![]);
             }
         },
         _ => {
             tracing::warn!("handle_identity_response: NAS decode failed or wrong PDU type");
-            return vec![];
+            return (vec![], vec![]);
         }
     };
 
@@ -265,7 +318,7 @@ pub fn handle_identity_response(
         Some(imsi) => imsi,
         None => {
             tracing::warn!("handle_identity_response: protected SUCI de-concealment not implemented");
-            return vec![];
+            return (vec![], vec![]);
         }
     };
 
@@ -273,7 +326,7 @@ pub fn handle_identity_response(
         Some(info) => info,
         None => {
             tracing::warn!(imsi, "handle_identity_response: unknown subscriber");
-            return vec![];
+            return (vec![], vec![]);
         }
     };
 
@@ -281,7 +334,7 @@ pub fn handle_identity_response(
         Some(aka) => aka.plmn,
         None => {
             tracing::warn!(amf_ue_ngap_id, "handle_identity_response: no 5G-AKA context (spawned in start_registration)");
-            return vec![];
+            return (vec![], vec![]);
         }
     };
 
@@ -318,7 +371,7 @@ pub fn handle_identity_response(
         ran_ue_ngap_id,
         nas_pdu: nas,
     });
-    vec![dl]
+    (vec![dl], vec![])
 }
 
 // ── Step 3: AuthenticationResponse ──────────────────────────────────────────
@@ -332,12 +385,12 @@ pub fn handle_auth_response(
     ran_ue_ngap_id: u32,
     amf_ue_ngap_id: u32,
     nas_pdu: &[u8],
-) -> Vec<NgapMessage> {
+) -> (Vec<NgapMessage>, Vec<N3Event>) {
     let res_star = match decode_nas5gs(nas_pdu) {
         Ok(Nas5gsPdu::AuthenticationResponse(inner)) => inner.res_star,
         _ => {
             tracing::warn!("handle_auth_response: bad NAS PDU");
-            return vec![];
+            return (vec![], vec![]);
         }
     };
 
@@ -345,7 +398,7 @@ pub fn handle_auth_response(
         Some(aka) => aka.pending_xres_star,
         None => {
             tracing::warn!(amf_ue_ngap_id, "handle_auth_response: no 5G-AKA context");
-            return vec![];
+            return (vec![], vec![]);
         }
     };
 
@@ -358,7 +411,7 @@ pub fn handle_auth_response(
     if !matched {
         world.set_auth_state(amf_ue_ngap_id, AuthState::Failed(AuthFailReason::ResMismatch));
         tracing::warn!(amf_ue_ngap_id, "handle_auth_response: RES* mismatch");
-        return vec![];
+        return (vec![], vec![]);
     }
     world.set_auth_state(amf_ue_ngap_id, AuthState::Authenticated);
 
@@ -372,7 +425,7 @@ pub fn handle_auth_response(
         ran_ue_ngap_id,
         nas_pdu: nas,
     });
-    vec![dl]
+    (vec![dl], vec![])
 }
 
 // ── Step 4: SecurityModeComplete ────────────────────────────────────────────
@@ -388,18 +441,30 @@ pub fn handle_auth_response(
 /// component to hold it earlier. Doesn't change any of the KDF math, just
 /// where in the procedure it happens.
 ///
-/// Sent via `DownlinkNasTransport`, not `InitialContextSetupRequest` — see
-/// module doc "Phase A vs Phase B."
+/// Sent via `DownlinkNasTransport` in Phase A mode (`phase_b_upf == None`),
+/// or `InitialContextSetupRequest` with one bundled default PDU session in
+/// Phase B mode — see module doc "Phase A vs Phase B."
+///
+/// `security_key` on the Phase B `InitialContextSetupRequest` is KAMF
+/// itself, passed straight through — same simplification
+/// `mme::attach::handle_security_mode_complete`'s Phase 3 branch already
+/// makes for LTE (`security_key: kasme`, not a separately-derived KeNB).
+/// Real TS 33.501 would derive a distinct KgNB from KAMF (Annex A.9-family
+/// KDF, NAS COUNT-bound) before this point — not implemented here, same
+/// known gap LTE's KeNB derivation already has, not a new one introduced by
+/// this increment.
 pub fn handle_security_mode_complete(
     world: &mut World,
     ran_ue_ngap_id: u32,
     amf_ue_ngap_id: u32,
-) -> Vec<NgapMessage> {
+    phase_b_upf: Option<[u8; 4]>,
+    teid_allocator: &mut TeidAllocator,
+) -> (Vec<NgapMessage>, Vec<N3Event>) {
     let imsi = match world.identity(amf_ue_ngap_id) {
         Some(i) => i.imsi,
         None => {
             tracing::warn!(amf_ue_ngap_id, "handle_security_mode_complete: no identity component");
-            return vec![];
+            return (vec![], vec![]);
         }
     };
 
@@ -407,7 +472,7 @@ pub fn handle_security_mode_complete(
         Some(aka) => (aka.ck, aka.ik, aka.ak, aka.plmn, aka.sqn_used),
         None => {
             tracing::warn!(amf_ue_ngap_id, "handle_security_mode_complete: no 5G-AKA context");
-            return vec![];
+            return (vec![], vec![]);
         }
     };
 
@@ -431,14 +496,50 @@ pub fn handle_security_mode_complete(
         &mut nas_security, NAS5GS_SHT_INTEGRITY_CIPHERED, &registration_accept_plain,
     );
 
-    world.set_nas_security5g(amf_ue_ngap_id, nas_security);
+    if let Some(upf_addr) = phase_b_upf {
+        let ul_teid = teid_allocator.alloc();
 
-    let dl = NgapMessage::DownlinkNasTransport(NgapDownlinkNasTransport {
-        amf_ue_ngap_id,
-        ran_ue_ngap_id,
-        nas_pdu: registration_accept_nas,
-    });
-    vec![dl]
+        world.set_nas_security5g(amf_ue_ngap_id, nas_security);
+        world.set_tunnel(amf_ue_ngap_id, TunnelComponent { ul_teid, dl_teid: 0, enb_addr: [0; 4] });
+
+        let icsr = NgapMessage::InitialContextSetupRequest(NgapInitialContextSetupRequest {
+            amf_ue_ngap_id,
+            ran_ue_ngap_id,
+            pdu_sessions: vec![PduSessionToSetup {
+                pdu_session_id: DEFAULT_PDU_SESSION_ID,
+                qfi: DEFAULT_QFI,
+                gtp_teid: ul_teid.to_be_bytes(),
+                transport_layer_addr: upf_addr,
+            }],
+            nas_pdu: Some(registration_accept_nas),
+            ue_ambr: (50_000_000, 50_000_000), // same placeholder AMBR mme::attach's Phase 3 branch uses
+            security_key: kamf,
+        });
+
+        let evt = N3Event::CreateSession {
+            ul_teid,
+            entity_id: amf_ue_ngap_id,
+            imsi,
+            pdu_session_id: DEFAULT_PDU_SESSION_ID,
+            qfi: DEFAULT_QFI,
+            // No UE IP allocator exists for either RAT in this simulation —
+            // mme::attach's own `ue_ip` is the same permanent [0;4]
+            // placeholder in practice (see that module's `start_attach`).
+            // gnb_addr fills in once InitialContextSetupResponse arrives —
+            // see state_machine::Amf::handle_ics_response.
+            ue_ip: [0; 4],
+            gnb_addr: [0; 4],
+        };
+        (vec![icsr], vec![evt])
+    } else {
+        world.set_nas_security5g(amf_ue_ngap_id, nas_security);
+        let dl = NgapMessage::DownlinkNasTransport(NgapDownlinkNasTransport {
+            amf_ue_ngap_id,
+            ran_ue_ngap_id,
+            nas_pdu: registration_accept_nas,
+        });
+        (vec![dl], vec![])
+    }
 }
 
 // ── Step 5: RegistrationComplete ────────────────────────────────────────────
@@ -448,7 +549,7 @@ pub fn handle_security_mode_complete(
 pub fn handle_registration_complete(
     _world: &mut World,
     amf_ue_ngap_id: u32,
-) -> Vec<NgapMessage> {
+) -> (Vec<NgapMessage>, Vec<N3Event>) {
     tracing::info!(amf_ue_ngap_id, "RegistrationComplete — subscriber online");
-    vec![]
+    (vec![], vec![])
 }

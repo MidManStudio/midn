@@ -24,18 +24,22 @@
 //!     naming symmetric on purpose) — the original stub jumped straight to
 //!     `PduSessionResourceSetup*` and had no message carrying the AS
 //!     security anchor key or a piggybacked NAS Registration Accept, which
-//!     the AMF registration procedure will need. `PduSessionResourceSetup*`
+//!     the AMF registration procedure needs in Phase B mode. `PduSessionResourceSetup*`
 //!     is left untouched — TS 38.413 really does have both as separate
 //!     procedures (initial PDU session(s) can ride inside
 //!     InitialContextSetupRequest OR arrive later via a standalone
-//!     PDUSessionResourceSetupRequest; this project models the former for
-//!     now, matching how `s1ap`'s ICSR carries the initial E-RAB(s)).
+//!     PDUSessionResourceSetupRequest; this project models the former,
+//!     matching how `s1ap`'s ICSR carries the initial E-RAB(s)).
 //!
 //! PER wire encoding for `InitialUeMessage`/`Uplink`/`DownlinkNasTransport`
 //! is implemented in `ngap::codec` (mirrors `s1ap::codec`'s scope exactly).
 //! `InitialContextSetupRequest/Response` and everything else here is struct-
-//! only for now — no codec yet, same phased pattern S1AP's ICSR went
-//! through before it got PER support.
+//! only for now — no codec yet. `s1ap`'s own ICSR is in the identical
+//! position (see that module's codec doc) despite LTE's Phase 3 having
+//! shipped and passed CI for a while — `Mme`/`Amf` dispatch on the
+//! `S1apMessage`/`NgapMessage` enum directly and never go through
+//! `encode_*_pdu`/`decode_*_pdu` internally, so struct-only is enough until
+//! a real SCTP wire boundary exists (not built yet, either RAT).
 
 use bytes::Bytes;
 
@@ -112,8 +116,9 @@ pub struct NgapUplinkNasTransport {
 
 /// Initial Context Setup Request IEs.
 ///
-/// Field names match what the AMF registration procedure (Phase B, next
-/// increment) will construct — same intent as `s1ap`'s ICSR doc comment.
+/// Field names match what `amf::registration`'s Phase B branch constructs
+/// (`handle_security_mode_complete`) — same intent as `s1ap`'s ICSR doc
+/// comment.
 #[derive(Debug, Clone)]
 pub struct NgapInitialContextSetupRequest {
     pub amf_ue_ngap_id: u32,

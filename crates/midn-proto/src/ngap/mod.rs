@@ -19,11 +19,14 @@
 //! `ie_ids` before relying on this for actual gNB hardware — confidence
 //! here is explicitly LOWER than the S1AP constants, see that file.
 //!
-//! Not yet wired into an AMF state machine — `crate::midn_core::amf` exists
-//! as dead/unwired scaffold code in `midn-core` (not declared in that
-//! crate's `lib.rs`) and still references pre-ECS-extraction module paths.
-//! Wiring the AMF registration procedure against this codec is the next
-//! increment after this one.
+//! Wired into the AMF state machine (`midn_core::amf`) — `InitialUeMessage`/
+//! `Uplink`/`DownlinkNasTransport` and now `InitialContextSetupRequest`/
+//! `Response` too, via the `NgapMessage` enum directly (`Amf::process_ngap`
+//! dispatches on the enum, not through this file's PER codec — see
+//! `amf::registration` module doc "Phase A vs Phase B" for why that's
+//! enough for now). This file's PER encode/decode (`codec` module, scope
+//! noted above) is a separate concern, only exercised once a real SCTP wire
+//! boundary exists — not built yet.
 
 pub mod codec;
 pub mod ie_ids;

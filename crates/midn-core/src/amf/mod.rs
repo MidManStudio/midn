@@ -12,14 +12,25 @@
 //!
 //! ## Status
 //!
-//! `registration` — 5G Registration procedure, Phase A: full flow through
+//! `registration` — 5G Registration procedure, full flow through
 //! RegistrationComplete, real 5G-AKA (Milenage via `Hss` + the TS 33.501
 //! Annex A KAUSF/KSEAF/KAMF chain in `midn_core::kdf`), real NAS security
-//! activation. No PDU Session Establishment, no TEID/UPF interaction, no
-//! `InitialContextSetupRequest` — see `registration` module doc's
-//! "Phase A vs Phase B" for exactly why and what Phase B adds.
+//! activation. Two modes, same shape as `mme`'s Phase 2/Phase 3 split:
+//!   - Phase A (`Amf::new()`): RegistrationAccept via `DownlinkNasTransport`,
+//!     no PDU session, no TEID/UPF interaction.
+//!   - Phase B (`Amf::new().with_phase_b(upf_addr)`): RegistrationAccept +
+//!     one bundled default PDU session via `InitialContextSetupRequest`,
+//!     `InitialContextSetupResponse` updates the tunnel with the real DL
+//!     TEID/gNB address. See `registration` module doc's "Phase A vs
+//!     Phase B" for exactly what's bundled and — importantly — why this
+//!     didn't actually need any `ngap::codec` PER support to build (a
+//!     correction to an earlier handover note that claimed otherwise).
+//!
+//! No `UeContextReleaseComplete`/deregistration handling yet — nothing
+//! produces a release trigger for AMF at all yet, unlike `mme::detach`'s
+//! LTE counterpart. Natural next increment, not started.
 
 pub mod registration;
 pub mod state_machine;
 
-pub use state_machine::Amf;
+pub use state_machine::{Amf, N3Event};
