@@ -1,0 +1,16 @@
+# crates/midn-transport/Cargo.toml
+[package]
+name    = "midn-transport"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rtc-sctp   = "0.20"
+rtc-shared = "0.20"   # TransportProtocol / TransportContext / error::Error — see link.rs doc
+bytes      = "1.5"
+tokio     = { version = "1", features = ["rt", "rt-multi-thread", "net", "sync", "time", "macros"] }
+tracing   = "0.1"
+thiserror = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
