@@ -1,10 +1,14 @@
-name: Apply Replacements
+name: Apply replacements
 
 on:
   workflow_dispatch:
     inputs:
+      template:
+        description: 'Path to .mdix replacements manifest'
+        required: false
+        default: '.mdix/replacements/replacements.mdix'
       dry_run:
-        description: 'Preview changes without writing'
+        description: 'true = preview only. false = actually write + commit.'
         required: false
         type: choice
         default: 'true'
@@ -21,8 +25,8 @@ on:
           - 'skip'
           - 'backup'
           - 'rename'
-      dump_json:
-        description: 'Dump the full untruncated structure JSON'
+      delete_processed_archives:
+        description: 'After a successful non-dry-run apply, delete the processed archive(s) from .mdix/replacements/ so they cannot be accidentally re-run later'
         required: false
         type: choice
         default: 'false'
@@ -33,16 +37,13 @@ on:
     paths:
       - '.mdix/replacements/**'
 
-permissions:
-  contents: write
-
 jobs:
   replace:
     uses: Mid-D-Man/mdix-scaffold/.github/workflows/generate-structure.yml@main
+    permissions:
+      contents: write
     with:
-      template:      '.mdix/replacements/replacements.mdix'
-      # Forced 'true' on every push — only a manual dispatch, with the
-      # dropdown explicitly flipped, can make this actually write + commit.
-      dry_run:       ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'true' }}
-      file_strategy: ${{ inputs.file_strategy || 'overwrite' }}
-      dump_json:     ${{ inputs.dump_json || 'false' }}
+      template:                  ${{ inputs.template || '.mdix/replacements/replacements.mdix' }}
+      dry_run:                   ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'true' }}
+      file_strategy:              ${{ inputs.file_strategy || 'overwrite' }}
+      delete_processed_archives:  ${{ inputs.delete_processed_archives || 'false' }}
