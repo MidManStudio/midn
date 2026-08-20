@@ -6,6 +6,7 @@ members = [
     "crates/midn-core",
     "crates/midn-userplane",
     "crates/midn-userplane-ebpf",
+    "crates/midn-transport",
 ]
 resolver = "2"
 
