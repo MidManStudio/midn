@@ -56,7 +56,7 @@ const RAN_UE_NGAP_ID: u32 = 7;
 const AMF_BIND_ADDR: &str = "127.0.0.1:38412";
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::WARN)
         .init();
@@ -90,7 +90,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 // ── AMF side ─────────────────────────────────────────────────────────────────
 
-async fn run_amf(bind_addr: SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_amf(bind_addr: SocketAddr) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut amf = midn_core::amf::Amf::new();
     amf.hss_mut().provision_hex(TEST_IMSI, TEST_K, TEST_OPC)?;
 
@@ -133,7 +133,7 @@ async fn run_amf(bind_addr: SocketAddr) -> Result<(), Box<dyn std::error::Error>
 
 // ── UE / gNB side ────────────────────────────────────────────────────────────
 
-async fn run_ue(bind_addr: SocketAddr, amf_addr: SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_ue(bind_addr: SocketAddr, amf_addr: SocketAddr) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("[UE ] connecting to AMF at {amf_addr}");
     let mut link = SctpLink::connect(bind_addr, amf_addr).await?;
 
@@ -259,7 +259,7 @@ fn suci_for_imsi(imsi: u64) -> Suci {
     Suci { mcc: [0, 0, 0], mnc: [0, 0, 0], routing_indicator: 0, protection_scheme: 0, home_network_pki: 0, msin }
 }
 
-async fn send_initial(link: &mut SctpLink, nas_pdu: Bytes) -> Result<(), Box<dyn std::error::Error>> {
+async fn send_initial(link: &mut SctpLink, nas_pdu: Bytes) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let msg = NgapMessage::InitialUeMessage(NgapInitialUeMessage {
         ran_ue_ngap_id: RAN_UE_NGAP_ID,
         nas_pdu,
@@ -275,7 +275,7 @@ async fn send_uplink(
     link: &mut SctpLink,
     amf_ue_ngap_id: u32,
     nas_pdu: Bytes,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let msg = NgapMessage::UplinkNasTransport(NgapUplinkNasTransport {
         amf_ue_ngap_id,
         ran_ue_ngap_id: RAN_UE_NGAP_ID,
@@ -298,4 +298,4 @@ fn ngap_summary(msg: &NgapMessage) -> &'static str {
         NgapMessage::InitialContextSetupResponse(_) => "InitialContextSetupResponse",
         _ => "(other NGAP message)",
     }
-}
+                    }
