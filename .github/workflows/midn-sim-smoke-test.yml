@@ -1,27 +1,32 @@
 # .github/workflows/midn-sim-smoke-test.yml
 #
-# Runs midn-transport + midn-sim for real — not just cargo build — and
-# checks the log for the actual protocol steps happening, not just "the
-# process exited 0". Two layers:
-#   1. midn-transport's own offline handshake test (cargo test -p
-#      midn-transport) — no socket, no timing, pure Sans-IO protocol
-#      logic (two rtc_sctp::Endpoints driven by hand). Fails fast on a
-#      logic bug before spending time on real I/O.
-#   2. midn-sim run for real — one process, an AMF task and a UE/gNB task
-#      talking over a real loopback UdpSocket, driving the full 5G
-#      Registration procedure (Phase A) end to end.
+# Runs midn-transport + midn-sim for real, not just `cargo build` — exists
+# specifically so this can be verified from anywhere GitHub Actions is
+# reachable, no local toolchain needed at all. Modeled directly on
+# Mid-D-Man/mid-engine's headless-server-smoke-test.yml: real process, real
+# loopback socket, poll for a genuine readiness signal rather than a fixed
+# sleep, grep the log for named checkpoints, write a real pass/fail table to
+# the job summary — a glance at the Actions list tells you whether the
+# Registration procedure actually completed over a real SCTP-over-UDP
+# socket, not just whether the binary happened to compile and exit 0.
 #
-# Neither crate is wired into midn-test.yml's per-crate path-gated system
-# yet — this is deliberately a separate, workflow_dispatch-only workflow
-# instead of touching that file blind. Modeled directly on
-# Mid-D-Man/mid-engine's headless-server-smoke-test.yml: same toolchain/
-# cache steps midn-test.yml itself already uses (dtolnay/rust-toolchain,
-# actions/cache@v4, same cache paths), same "grep the log for named
-# checkpoints and write a real pass/fail table to the job summary" pattern
-# mid-engine's workflow already uses successfully for its own headless
-# QUIC server/client example — exists for the same reason theirs does:
-# verifiable from anywhere GitHub Actions is reachable, no local
-# toolchain needed at all.
+# Two layers, cheaper one first:
+#   1. midn-transport's own offline handshake test (cargo test -p
+#      midn-transport) — no socket, no timing, pure Sans-IO protocol logic
+#      against the real rtc_sctp crate. Fails fast on a logic bug before
+#      spending time on real I/O.
+#   2. midn-sim run for real — one process, the AMF and UE/gNB each on
+#      their own Tokio task, talking ONLY through a real loopback
+#      UdpSocket. The log is checked for the actual protocol steps
+#      happening (SUCI sent, RES* verified, RegistrationAccept decrypted,
+#      etc.), not just "the process exited 0".
+#
+# Deliberately a separate, workflow_dispatch-only workflow rather than
+# touching midn-test.yml's per-crate path-gated system — neither
+# midn-transport nor midn-sim are wired into that file yet, and grafting
+# new path-detection branches into an already-working 680-line workflow
+# blind is a worse trade than one small, self-contained file that's easy
+# to extend once this has actually been run and confirmed green.
 
 name: midn-sim — Smoke Test
 
@@ -33,10 +38,9 @@ permissions:
 
 env:
   # midn-sim's own flow completes in well under a second on real hardware
-  # (a handful of loopback UDP round trips, no fixed sleeps in the happy
-  # path beyond the 50ms task-start stagger in main.rs). This bounds the
-  # job in case something hangs — e.g. the SCTP handshake never
-  # completing — it isn't expected to actually be hit on a working run.
+  # (a handful of loopback UDP round trips) — this bounds the job in case
+  # something hangs (e.g. the SCTP handshake never completing). Not
+  # expected to actually be hit on a successful run.
   RUN_TIMEOUT_SECONDS: 30
 
 jobs:
@@ -47,13 +51,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust stable toolchain
+      - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Get Rust version
         id: rustver
         run: echo "ver=$(rustc --version)" >> $GITHUB_OUTPUT
 
+      # Same path list / key prefix midn-test.yml's own cache step uses —
+      # the `cargo-registry-` restore-keys fallback means this can reuse
+      # whatever midn-test.yml already downloaded (tokio, thiserror,
+      # tracing, etc.) even on this workflow's very first run.
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -62,29 +70,28 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-          key: cargo-registry-midn-sim-${{ hashFiles('Cargo.toml') }}
-          restore-keys: cargo-registry-
+          key: cargo-registry-midn-sim-${{ hashFiles('crates/midn-transport/Cargo.toml', 'crates/midn-sim/Cargo.toml') }}
+          restore-keys: |
+            cargo-registry-midn-sim-
+            cargo-registry-midn-
+            cargo-registry-
 
-      # No `|| true` here — a build failure is a genuinely different,
-      # earlier-stage problem worth halting the job on immediately, same
-      # distinction mid-engine's own workflow draws between its (hard-gated)
-      # build step and its (soft-gated) run steps below.
-      - name: Build midn-transport and midn-sim
+      # Real hard gate — a build failure halts the job here, same as
+      # midn-test.yml's own per-crate Build steps.
+      - name: Build midn-transport + midn-sim
         run: |
           cargo build -p midn-transport --release
           cargo build -p midn-sim --release
 
-      # `|| true`: a failing assertion here is real information the
-      # summary step below should report, not a reason to skip straight
-      # past the midn-sim run and lose that run's own diagnostics too.
+      # `|| true`: this step's own exit code doesn't decide pass/fail —
+      # the log-content checks in the final step do. Without this, a
+      # single failing assertion here would skip the midn-sim run below
+      # and lose that diagnostic signal from the same attempt.
       - name: Test midn-transport (offline, no socket)
         run: |
           cargo test -p midn-transport --release -- --nocapture \
             > midn-transport-test.log 2>&1 || true
 
-      # Same `|| true` reasoning — a hang gets caught by `timeout` (exit
-      # 124), a real failure exits non-zero, and either way the log-content
-      # checks below are what actually decide pass/fail, not this exit code.
       - name: Run midn-sim end to end
         run: |
           timeout "${RUN_TIMEOUT_SECONDS}"s \
@@ -108,19 +115,20 @@ jobs:
           sim_log = read_or('midn-sim.log')
 
           # (label, log, required substring) — every one of these has to
-          # actually appear for the exchange to count as real, not just
-          # "the process started".
+          # actually appear for the run to count as a real, complete
+          # Registration procedure, not just "the processes started".
           checks = [
-              ("midn-transport: offline handshake test passed",     transport_log, "test result: ok"),
-              ("AMF: SCTP association established",                 sim_log, "[AMF] SCTP association established"),
-              ("UE:  SCTP association established",                 sim_log, "[UE ] SCTP association established"),
-              ("UE:  sent RegistrationRequest",                     sim_log, "[UE ] -> RegistrationRequest"),
-              ("AMF: routed it, replied with DownlinkNasTransport",  sim_log, "[AMF] -> DownlinkNasTransport"),
-              ("UE:  completed AuthenticationResponse (real 5G-AKA)", sim_log, "[UE ] -> AuthenticationResponse(RES*)"),
-              ("UE:  completed SecurityModeComplete",               sim_log, "[UE ] -> SecurityModeComplete"),
-              ("UE:  decrypted RegistrationAccept",                 sim_log, "[UE ] <- RegistrationAccept"),
-              ("UE:  sent RegistrationComplete",                    sim_log, "[UE ] -> RegistrationComplete"),
-              ("Overall: simulation reported success",              sim_log, "Full Registration procedure completed"),
+              ("midn-transport: offline handshake test passed", transport_log, "test result: ok"),
+              ("AMF: SCTP association established",             sim_log, "[AMF] SCTP association established"),
+              ("UE:  SCTP association established",             sim_log, "[UE ] SCTP association established"),
+              ("UE:  sent RegistrationRequest",                 sim_log, "[UE ] -> RegistrationRequest"),
+              ("AMF: routed it, replied with IdentityRequest",  sim_log, "[AMF] -> DownlinkNasTransport"),
+              ("UE:  sent IdentityResponse(SUCI)",              sim_log, "[UE ] -> IdentityResponse(SUCI)"),
+              ("UE:  sent AuthenticationResponse (RES*)",       sim_log, "[UE ] -> AuthenticationResponse(RES*)"),
+              ("UE:  sent SecurityModeComplete",                sim_log, "[UE ] -> SecurityModeComplete"),
+              ("UE:  decrypted RegistrationAccept",             sim_log, "[UE ] <- RegistrationAccept"),
+              ("UE:  sent RegistrationComplete",                sim_log, "[UE ] -> RegistrationComplete"),
+              ("Overall: simulation reported success",          sim_log, "Full Registration procedure completed"),
           ]
 
           results = [(label, log is not None and needle in log) for label, log, needle in checks]
