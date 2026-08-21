@@ -1,0 +1,19 @@
+# crates/midn-sim/Cargo.toml
+[package]
+name    = "midn-sim"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "midn-sim"
+path = "src/main.rs"
+
+[dependencies]
+midn-transport    = { path = "../midn-transport" }
+midn-proto        = { path = "../midn-proto" }
+midn-core         = { path = "../midn-core" }
+midn-auth         = { path = "../midn-auth" }
+bytes             = "1.5"
+tokio             = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+tracing           = "0.1"
+tracing-subscriber = "0.3"
