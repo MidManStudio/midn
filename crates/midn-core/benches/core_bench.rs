@@ -16,7 +16,7 @@
 
 use criterion::{
     black_box, criterion_group, criterion_main,
-    BatchSize, BenchmarkId, Criterion,
+    BatchSize, Criterion,
 };
 
 use midn_ecs::{
@@ -27,14 +27,32 @@ use midn_core::hss::Hss;
 // ── ECS world benchmarks ──────────────────────────────────────────────────────
 
 fn bench_ecs_spawn(c: &mut Criterion) {
-    let mut world = World::with_capacity(128);
-
     // Gate: < 1 µs
+    //
+    // iter_batched, not a single shared World + plain b.iter: this is what
+    // actually caused CI's benchmark job to die (SIGTERM, exit 143)
+    // partway through collecting ecs_spawn's samples. A single World
+    // shared across every warmup + measurement iteration never gets
+    // despawned — Criterion auto-scales iteration count from an early,
+    // cheap-looking estimate (this session: 44M iterations for a 5-second
+    // window), and spawn() genuinely is O(1) per call, but with nothing
+    // ever freed, that's 44M live entries accumulating across 7 component
+    // Vecs (identity/auth/security/nas_security/tunnel/security5g/
+    // nas_security5g) — real gigabytes of growth mid-benchmark, not a
+    // black_box measurement artifact. iter_batched gives each batch a
+    // fresh, small World, exactly like bench_ecs_spawn_with_all_components
+    // immediately below already does, for the same underlying reason (see
+    // that function's own comment) — this function just wasn't using the
+    // same pattern despite sharing the risk.
     c.bench_function("ecs_spawn", |b| {
-        b.iter(|| {
-            let id = world.spawn();
-            black_box(id)
-        })
+        b.iter_batched(
+            || World::with_capacity(128),
+            |mut world| {
+                let id = world.spawn();
+                black_box(id)
+            },
+            BatchSize::SmallInput,
+        )
     });
 }
 
@@ -165,13 +183,23 @@ fn bench_registry(c: &mut Criterion) {
     });
 
     // Gate: < 500 ns
+    //
+    // iter_batched with a fresh, empty ImsiRegistry per batch, not the
+    // shared `registry` above with an always-incrementing key — same
+    // unbounded-growth class of bug bench_ecs_spawn had (found reading
+    // this file while root-causing that one): `ImsiRegistry` is a
+    // `HashMap<u64, EntityId>` internally, and a distinct key every single
+    // one of tens of millions of iterations means the map itself grows
+    // that large before the run ends, never actually measuring a steady-
+    // state O(1) insert. The key value is irrelevant here (the map is
+    // always empty beforehand), so no need to keep incrementing it.
     c.bench_function("registry_register", |b| {
-        let mut idx = 100_000u64;
         let id = world.spawn();
-        b.iter(|| {
-            idx += 1;
-            registry.register(black_box(idx), black_box(id))
-        })
+        b.iter_batched(
+            ImsiRegistry::new,
+            |mut reg| reg.register(black_box(12345), black_box(id)),
+            BatchSize::SmallInput,
+        )
     });
 }
 
@@ -179,16 +207,23 @@ fn bench_registry(c: &mut Criterion) {
 
 fn bench_hss_provision(c: &mut Criterion) {
     // Gate: < 1 µs
+    //
+    // iter_batched with a fresh Hss per batch, not a shared Hss with an
+    // always-incrementing imsi — same unbounded-growth class of bug
+    // bench_ecs_spawn had (see that function's comment): `Hss::subscribers`
+    // is a `HashMap<u64, SubscriberRecord>`, and a distinct imsi every
+    // iteration across tens of millions of them means the map grows that
+    // large mid-run instead of measuring a steady-state single insert.
+    // Fixed imsi value is fine — the map is always empty beforehand.
     c.bench_function("hss_provision_subscriber", |b| {
         let ki  = midn_auth::keys::AuthKey::from_hex("465b5ce8b199b49faa5f0a2ee238a6bc").unwrap();
         let opc = midn_auth::keys::OpCode::from_hex("cd63cb71954a9f4e48a5994e37a02baf").unwrap();
-        let mut hss  = Hss::new();
-        let mut imsi = 234_15_0000000001_u64;
 
-        b.iter(|| {
-            imsi += 1;
-            hss.provision(black_box(imsi), ki.clone(), opc.clone())
-        })
+        b.iter_batched(
+            Hss::new,
+            |mut hss| hss.provision(black_box(234_15_0000000001_u64), ki.clone(), opc.clone()),
+            BatchSize::SmallInput,
+        )
     });
 }
 
@@ -211,7 +246,14 @@ fn bench_hss_lookup(c: &mut Criterion) {
 }
 
 // ── Size / alignment verification ─────────────────────────────────────────────
-
+//
+// Wired into ecs_world_benches below (was dead code before this session —
+// defined but never added to any criterion_group!, hence the "function
+// bench_component_sizes is never used" warning in CI). Not a real
+// benchmark (no c.bench_function call, just an assert), but criterion_group!
+// still runs every listed function once when the harness starts, which is
+// exactly the "runs whenever benchmarks run" regression guard this looks
+// like it was meant to be.
 fn bench_component_sizes(_c: &mut Criterion) {
     assert_eq!(core::mem::size_of::<TunnelComponent>(), 12,
         "TunnelComponent size regressed");
@@ -226,6 +268,7 @@ criterion_group!(
     bench_ecs_despawn_with_zeroize,
     bench_ecs_lookup,
     bench_ecs_bulk_scan,
+    bench_component_sizes,
 );
 
 criterion_group!(
