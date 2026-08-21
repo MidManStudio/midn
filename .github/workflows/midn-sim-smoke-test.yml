@@ -1,0 +1,159 @@
+# .github/workflows/midn-sim-smoke-test.yml
+#
+# Runs midn-transport + midn-sim for real — not just cargo build — and
+# checks the log for the actual protocol steps happening, not just "the
+# process exited 0". Two layers:
+#   1. midn-transport's own offline handshake test (cargo test -p
+#      midn-transport) — no socket, no timing, pure Sans-IO protocol
+#      logic (two rtc_sctp::Endpoints driven by hand). Fails fast on a
+#      logic bug before spending time on real I/O.
+#   2. midn-sim run for real — one process, an AMF task and a UE/gNB task
+#      talking over a real loopback UdpSocket, driving the full 5G
+#      Registration procedure (Phase A) end to end.
+#
+# Neither crate is wired into midn-test.yml's per-crate path-gated system
+# yet — this is deliberately a separate, workflow_dispatch-only workflow
+# instead of touching that file blind. Modeled directly on
+# Mid-D-Man/mid-engine's headless-server-smoke-test.yml: same toolchain/
+# cache steps midn-test.yml itself already uses (dtolnay/rust-toolchain,
+# actions/cache@v4, same cache paths), same "grep the log for named
+# checkpoints and write a real pass/fail table to the job summary" pattern
+# mid-engine's workflow already uses successfully for its own headless
+# QUIC server/client example — exists for the same reason theirs does:
+# verifiable from anywhere GitHub Actions is reachable, no local
+# toolchain needed at all.
+
+name: midn-sim — Smoke Test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # midn-sim's own flow completes in well under a second on real hardware
+  # (a handful of loopback UDP round trips, no fixed sleeps in the happy
+  # path beyond the 50ms task-start stagger in main.rs). This bounds the
+  # job in case something hangs — e.g. the SCTP handshake never
+  # completing — it isn't expected to actually be hit on a working run.
+  RUN_TIMEOUT_SECONDS: 30
+
+jobs:
+  smoke-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Get Rust version
+        id: rustver
+        run: echo "ver=$(rustc --version)" >> $GITHUB_OUTPUT
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: cargo-registry-midn-sim-${{ hashFiles('Cargo.toml') }}
+          restore-keys: cargo-registry-
+
+      # No `|| true` here — a build failure is a genuinely different,
+      # earlier-stage problem worth halting the job on immediately, same
+      # distinction mid-engine's own workflow draws between its (hard-gated)
+      # build step and its (soft-gated) run steps below.
+      - name: Build midn-transport and midn-sim
+        run: |
+          cargo build -p midn-transport --release
+          cargo build -p midn-sim --release
+
+      # `|| true`: a failing assertion here is real information the
+      # summary step below should report, not a reason to skip straight
+      # past the midn-sim run and lose that run's own diagnostics too.
+      - name: Test midn-transport (offline, no socket)
+        run: |
+          cargo test -p midn-transport --release -- --nocapture \
+            > midn-transport-test.log 2>&1 || true
+
+      # Same `|| true` reasoning — a hang gets caught by `timeout` (exit
+      # 124), a real failure exits non-zero, and either way the log-content
+      # checks below are what actually decide pass/fail, not this exit code.
+      - name: Run midn-sim end to end
+        run: |
+          timeout "${RUN_TIMEOUT_SECONDS}"s \
+            cargo run -p midn-sim --release \
+            > midn-sim.log 2>&1 || true
+
+      - name: Check the exchange actually happened, write job summary
+        if: always()
+        run: |
+          python3 - << 'PYEOF'
+          import os
+
+          def read_or(path):
+              try:
+                  with open(path) as f:
+                      return f.read()
+              except FileNotFoundError:
+                  return None
+
+          transport_log = read_or('midn-transport-test.log')
+          sim_log = read_or('midn-sim.log')
+
+          # (label, log, required substring) — every one of these has to
+          # actually appear for the exchange to count as real, not just
+          # "the process started".
+          checks = [
+              ("midn-transport: offline handshake test passed",     transport_log, "test result: ok"),
+              ("AMF: SCTP association established",                 sim_log, "[AMF] SCTP association established"),
+              ("UE:  SCTP association established",                 sim_log, "[UE ] SCTP association established"),
+              ("UE:  sent RegistrationRequest",                     sim_log, "[UE ] -> RegistrationRequest"),
+              ("AMF: routed it, replied with DownlinkNasTransport",  sim_log, "[AMF] -> DownlinkNasTransport"),
+              ("UE:  completed AuthenticationResponse (real 5G-AKA)", sim_log, "[UE ] -> AuthenticationResponse(RES*)"),
+              ("UE:  completed SecurityModeComplete",               sim_log, "[UE ] -> SecurityModeComplete"),
+              ("UE:  decrypted RegistrationAccept",                 sim_log, "[UE ] <- RegistrationAccept"),
+              ("UE:  sent RegistrationComplete",                    sim_log, "[UE ] -> RegistrationComplete"),
+              ("Overall: simulation reported success",              sim_log, "Full Registration procedure completed"),
+          ]
+
+          results = [(label, log is not None and needle in log) for label, log, needle in checks]
+          all_ok = all(ok for _, ok in results)
+
+          lines = []
+          lines.append("## midn-sim Smoke Test")
+          lines.append("")
+          lines.append(
+              "### ✅ Full Registration procedure confirmed over a real SCTP-over-UDP socket"
+              if all_ok else "### ❌ Exchange incomplete"
+          )
+          lines.append("")
+          lines.append("| Check | Result |")
+          lines.append("|---|---|")
+          for label, ok in results:
+              lines.append(f"| {label} | {'✅' if ok else '❌'} |")
+          lines.append("")
+          lines.append("<details><summary>midn-transport-test.log</summary>\n")
+          lines.append("```")
+          lines.append((transport_log or "(missing — step never produced a log file)").strip())
+          lines.append("```")
+          lines.append("</details>")
+          lines.append("")
+          lines.append("<details><summary>midn-sim.log</summary>\n")
+          lines.append("```")
+          lines.append((sim_log or "(missing — step never produced a log file)").strip())
+          lines.append("```")
+          lines.append("</details>")
+
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+              f.write("\n".join(lines) + "\n")
+
+          if not all_ok:
+              raise SystemExit(1)
+          PYEOF
