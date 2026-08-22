@@ -14,19 +14,22 @@
 //! structs, built on the shared bit-packing engine at `crate::per` (the
 //! same engine `s1ap::codec` uses — S1AP and NGAP share identical ALIGNED
 //! PER transport conventions). See `codec` module docs for current scope
-//! (InitialUEMessage/Uplink/DownlinkNASTransport only, mirroring exactly
-//! where S1AP's codec started) and the spec-fidelity disclaimer in
-//! `ie_ids` before relying on this for actual gNB hardware — confidence
-//! here is explicitly LOWER than the S1AP constants, see that file.
+//! (`InitialUeMessage`/`Uplink`/`DownlinkNasTransport`/
+//! `InitialContextSetupRequest`/`Response`) and `ie_ids`'s "Confidence
+//! upgrade" note — every ProcedureCode/ProtocolIE-ID this file uses was
+//! checked against Wireshark's real NGAP-Constants.asn this session, not
+//! left at "best recollection."
 //!
-//! Wired into the AMF state machine (`midn_core::amf`) — `InitialUeMessage`/
-//! `Uplink`/`DownlinkNasTransport` and now `InitialContextSetupRequest`/
-//! `Response` too, via the `NgapMessage` enum directly (`Amf::process_ngap`
-//! dispatches on the enum, not through this file's PER codec — see
-//! `amf::registration` module doc "Phase A vs Phase B" for why that's
-//! enough for now). This file's PER encode/decode (`codec` module, scope
-//! noted above) is a separate concern, only exercised once a real SCTP wire
-//! boundary exists — not built yet.
+//! Wired into the AMF state machine (`midn_core::amf`) via the `NgapMessage`
+//! enum directly (`Amf::process_ngap` dispatches on the enum, not through
+//! this file's PER codec — see `amf::registration` module doc "Phase A vs
+//! Phase B"). This file's PER encode/decode is the SEPARATE layer that
+//! matters once bytes actually need to go on a wire — and now they do:
+//! `midn-transport`/`midn-sim` drive real `InitialUeMessage`/`Uplink`/
+//! `DownlinkNasTransport` PDUs over a real SCTP-over-UDP socket for Phase A.
+//! `InitialContextSetupRequest`/`Response` codec support (this session)
+//! extends that same real-wire path to Phase B — `midn-sim` doesn't call it
+//! yet (still Phase-A-only), but the codec itself is no longer the blocker.
 
 pub mod codec;
 pub mod ie_ids;

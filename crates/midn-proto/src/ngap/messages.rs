@@ -31,15 +31,11 @@
 //!     PDUSessionResourceSetupRequest; this project models the former,
 //!     matching how `s1ap`'s ICSR carries the initial E-RAB(s)).
 //!
-//! PER wire encoding for `InitialUeMessage`/`Uplink`/`DownlinkNasTransport`
-//! is implemented in `ngap::codec` (mirrors `s1ap::codec`'s scope exactly).
-//! `InitialContextSetupRequest/Response` and everything else here is struct-
-//! only for now — no codec yet. `s1ap`'s own ICSR is in the identical
-//! position (see that module's codec doc) despite LTE's Phase 3 having
-//! shipped and passed CI for a while — `Mme`/`Amf` dispatch on the
-//! `S1apMessage`/`NgapMessage` enum directly and never go through
-//! `encode_*_pdu`/`decode_*_pdu` internally, so struct-only is enough until
-//! a real SCTP wire boundary exists (not built yet, either RAT).
+//! PER wire encoding for all five messages here (`InitialUeMessage`/
+//! `Uplink`/`DownlinkNasTransport`/`InitialContextSetupRequest`/`Response`)
+//! is implemented in `ngap::codec`. Everything else in this file
+//! (`NgSetup*`, `PduSessionResourceSetup*`, `UeContextRelease*`) is struct-
+//! only — no codec yet.
 
 use bytes::Bytes;
 
