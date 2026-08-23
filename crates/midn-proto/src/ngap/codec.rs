@@ -163,6 +163,14 @@ fn write_pdu_sessions_to_setup(w: &mut PerWriter, sessions: &[PduSessionToSetup]
     for s in sessions {
         w.write_constrained_int(s.pdu_session_id as u64, 0, ie::PDU_SESSION_ID_MAX);
         w.write_constrained_int(s.qfi as u64, 0, ie::QFI_MAX);
+        // pdu_session_id (8 bits) + qfi (6 bits) = 14 bits — NOT byte-aligned.
+        // `write_octets` does not align itself (unlike `read_octets`, which
+        // always does), so without this the reader silently eats 2 bits of
+        // real gtp_teid data as phantom padding. Root cause of the
+        // initial_context_setup_request_round_trip CI failure (build #252) —
+        // see per.rs's write_octets/read_octets doc comments for the
+        // asymmetric-alignment contract this call site was violating.
+        w.align();
         w.write_octets(&s.gtp_teid);
         w.write_octets(&s.transport_layer_addr);
     }
@@ -189,6 +197,12 @@ fn write_pdu_sessions_setup(w: &mut PerWriter, items: &[PduSessionSetupItem]) {
     w.write_length_determinant(items.len());
     for it in items {
         w.write_constrained_int(it.pdu_session_id as u64, 0, ie::PDU_SESSION_ID_MAX);
+        // Currently a no-op: PDU_SESSION_ID_MAX=255 -> exactly 8 bits, so
+        // this is already byte-aligned. Kept explicit anyway so this stays
+        // correct if PDU_SESSION_ID_MAX ever narrows below a full octet —
+        // see write_pdu_sessions_to_setup above for what happens when a
+        // sub-byte field precedes write_octets without this.
+        w.align();
         w.write_octets(&it.transport_layer_addr);
         w.write_octets(&it.gtp_teid);
     }
@@ -898,4 +912,4 @@ mod tests {
         assert_eq!(d_cgi, nr_cgi);
         assert_eq!(d_tai, tai);
     }
-  }
+                                             }
