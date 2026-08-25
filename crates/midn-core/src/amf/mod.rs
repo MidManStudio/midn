@@ -26,10 +26,15 @@
 //!     didn't actually need any `ngap::codec` PER support to build (a
 //!     correction to an earlier handover note that claimed otherwise).
 //!
-//! No `UeContextReleaseComplete`/deregistration handling yet — nothing
-//! produces a release trigger for AMF at all yet, unlike `mme::detach`'s
-//! LTE counterpart. Natural next increment, not started.
+//! `deregistration` — UE-initiated deregistration (TS 23.502 §4.2.2.3):
+//! DeregistrationRequest -> (DeregistrationAccept unless switch_off) ->
+//! UeContextReleaseCommand -> UeContextReleaseComplete triggers the actual
+//! teardown (entity despawn, IMSI deregister, TEID release,
+//! `N3Event::RemoveSession`) in `state_machine::Amf::handle_release_complete`
+//! — same trigger/teardown split `mme::detach`/`handle_release_complete`
+//! use for LTE.
 
+pub mod deregistration;
 pub mod registration;
 pub mod state_machine;
 
