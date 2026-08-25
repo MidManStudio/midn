@@ -18,13 +18,20 @@
 //! test already proves the AMF side handles correctly in-process, now over
 //! a real socket for the first time.
 //!
-//! Run: `cargo run -p midn-sim`
+//! Run (single process, both roles — the original mode, still the default):
+//! `cargo run -p midn-sim`
 //!
-//! The AMF and UE sides share this process only for convenience (one
-//! `cargo run`, one log to read) — they do not share any Rust state.
-//! Everything either side knows about the other comes from bytes on the
-//! loopback socket, exactly as it would across two real processes or two
-//! network-namespace-separated hosts.
+//! Run as two independent OS processes instead — the shape `netns`+`veth`
+//! namespace-isolated testing needs, since two Tokio tasks in one process
+//! can't be placed in separate namespaces:
+//! `cargo run -p midn-sim -- --role amf --bind 10.99.0.1:38412`
+//! `cargo run -p midn-sim -- --role ue  --bind 10.99.0.2:0 --amf 10.99.0.1:38412`
+//!
+//! The AMF and UE sides sharing one process in the default mode is only
+//! ever a convenience (one `cargo run`, one log to read) — they do not
+//! share any Rust state either way. Everything either side knows about the
+//! other comes from bytes on the socket, loopback or not, one process or
+//! two.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -65,10 +72,138 @@ const GNB_N3_ADDR: [u8; 4] = [172, 16, 0, 5];
 const MOCK_DL_TEID: u32 = 0xAABB_CCDD;
 
 /// 38412 is the real, standardized NGAP-over-SCTP port (TS 38.412) —
-/// authenticity touch, not load-bearing: this binary's two sides only ever
-/// talk to each other on loopback, so any free, unprivileged port (>1024,
-/// no root needed) would work identically.
+/// authenticity touch, not load-bearing: whichever addresses the two sides
+/// actually get told to use (loopback in the default mode, real veth-pair
+/// IPs under `--role`) is what matters; any free, unprivileged port
+/// (>1024, no root needed) would work identically.
 const AMF_BIND_ADDR: &str = "127.0.0.1:38412";
+
+#[derive(Debug)]
+enum Role {
+    /// Original mode: both sides in this one process, on loopback.
+    Both,
+    Amf { bind: SocketAddr },
+    Ue { bind: SocketAddr, amf: SocketAddr },
+}
+
+const USAGE: &str = "\
+Usage:
+  midn-sim                                              (default: both roles, one process, loopback)
+  midn-sim --role amf --bind ADDR:PORT
+  midn-sim --role ue  --bind ADDR:PORT --amf ADDR:PORT   (--bind may use :0 for an OS-picked ephemeral port)";
+
+fn parse_args(args: &[String]) -> Result<Role, String> {
+    let mut role: Option<&str> = None;
+    let mut bind: Option<&str> = None;
+    let mut amf: Option<&str> = None;
+
+    let mut i = 0;
+    while i < args.len() {
+        let (flag, value) = (args[i].as_str(), args.get(i + 1).map(String::as_str));
+        match flag {
+            "--role" => role = value,
+            "--bind" => bind = value,
+            "--amf" => amf = value,
+            other => return Err(format!("unrecognized argument {other:?}\n\n{USAGE}")),
+        }
+        if value.is_none() {
+            return Err(format!("{flag} needs a value\n\n{USAGE}"));
+        }
+        i += 2;
+    }
+
+    match role {
+        None | Some("both") => Ok(Role::Both),
+        Some("amf") => Ok(Role::Amf {
+            bind: bind
+                .unwrap_or(AMF_BIND_ADDR)
+                .parse()
+                .map_err(|e| format!("--bind: {e}\n\n{USAGE}"))?,
+        }),
+        Some("ue") => Ok(Role::Ue {
+            bind: bind
+                .ok_or_else(|| format!("--role ue requires --bind ADDR:PORT\n\n{USAGE}"))?
+                .parse()
+                .map_err(|e| format!("--bind: {e}\n\n{USAGE}"))?,
+            amf: amf
+                .ok_or_else(|| format!("--role ue requires --amf ADDR:PORT\n\n{USAGE}"))?
+                .parse()
+                .map_err(|e| format!("--amf: {e}\n\n{USAGE}"))?,
+        }),
+        Some(other) => Err(format!("unknown --role {other:?} (expected amf, ue, or both)\n\n{USAGE}")),
+    }
+}
+
+#[cfg(test)]
+mod arg_tests {
+    use super::*;
+
+    fn args(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn no_args_means_both() {
+        assert!(matches!(parse_args(&args(&[])), Ok(Role::Both)));
+    }
+
+    #[test]
+    fn explicit_role_both() {
+        assert!(matches!(parse_args(&args(&["--role", "both"])), Ok(Role::Both)));
+    }
+
+    #[test]
+    fn amf_role_defaults_bind_addr() {
+        match parse_args(&args(&["--role", "amf"])) {
+            Ok(Role::Amf { bind }) => assert_eq!(bind, AMF_BIND_ADDR.parse().unwrap()),
+            other => panic!("expected Role::Amf with the default bind addr, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn amf_role_with_explicit_bind() {
+        match parse_args(&args(&["--role", "amf", "--bind", "10.99.0.1:38412"])) {
+            Ok(Role::Amf { bind }) => assert_eq!(bind, "10.99.0.1:38412".parse().unwrap()),
+            other => panic!("expected Role::Amf with the given bind addr, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ue_role_requires_bind_and_amf() {
+        match parse_args(&args(&["--role", "ue", "--bind", "10.99.0.2:0", "--amf", "10.99.0.1:38412"])) {
+            Ok(Role::Ue { bind, amf }) => {
+                assert_eq!(bind, "10.99.0.2:0".parse().unwrap());
+                assert_eq!(amf, "10.99.0.1:38412".parse().unwrap());
+            }
+            other => panic!("expected Role::Ue with both addrs, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ue_role_without_bind_is_an_error() {
+        assert!(parse_args(&args(&["--role", "ue", "--amf", "10.99.0.1:38412"])).is_err());
+    }
+
+    #[test]
+    fn ue_role_without_amf_is_an_error() {
+        assert!(parse_args(&args(&["--role", "ue", "--bind", "10.99.0.2:0"])).is_err());
+    }
+
+    #[test]
+    fn unknown_role_is_an_error() {
+        assert!(parse_args(&args(&["--role", "upf"])).is_err());
+    }
+
+    #[test]
+    fn unrecognized_flag_is_an_error() {
+        assert!(parse_args(&args(&["--wat", "huh"])).is_err());
+    }
+
+    #[test]
+    fn bad_addr_is_an_error() {
+        assert!(parse_args(&args(&["--role", "amf", "--bind", "not-an-addr"])).is_err());
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -76,6 +211,50 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .with_max_level(tracing::Level::WARN)
         .init();
 
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let role = parse_args(&args).map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
+
+    match role {
+        Role::Both => run_both().await,
+
+        Role::Amf { bind } => {
+            println!("midn-sim — AMF only\n");
+            // No matching drain-sleep-then-exit here on purpose: a
+            // single-role AMF process has no natural end (`run_amf` only
+            // returns on a lost/closed link) — it's meant to keep serving
+            // until whatever started it (a netns/veth test script, most
+            // likely) explicitly stops it. See `run_both`'s doc comment
+            // for why that orchestrator needs its own drain delay before
+            // doing so, same reasoning as the single-process shutdown race
+            // this file already hit once.
+            run_amf(bind).await
+        }
+
+        Role::Ue { bind, amf } => {
+            println!("midn-sim — UE/gNB only, {bind} -> AMF {amf}\n");
+            // Same reasoning as `run_both`'s startup sleep: gives the peer
+            // process a head start on binding before the first INIT is
+            // sent. Cheaper than polling for it, SCTP's own retransmission
+            // covers the rest if this isn't enough.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+
+            let result = run_ue(bind, amf).await;
+            match &result {
+                Ok(()) => println!(
+                    "\n✅ Full Registration procedure completed over a real SCTP-over-UDP socket."
+                ),
+                Err(e) => println!("\n❌ Simulation failed: {e}"),
+            }
+            result
+        }
+    }
+}
+
+/// Original combined mode: both sides as Tokio tasks in this one process,
+/// on loopback. Still the default (`midn-sim` with no args) — the existing
+/// `midn-sim-smoke-test.yml` workflow calls it exactly this way and needs
+/// no changes.
+async fn run_both() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let amf_addr: SocketAddr = AMF_BIND_ADDR.parse().unwrap();
     // Port 0 = OS picks a free ephemeral port for the UE side.
     let ue_bind_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -113,6 +292,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // the other end of the run; 200ms is generous relative to a couple of
     // loopback UDP round trips + task wakeups, cheap against the
     // workflow's 30s budget.
+    //
+    // A `--role amf` / `--role ue` two-process run has the exact same
+    // shape of race — whatever starts both processes for a netns/veth test
+    // needs its own equivalent drain delay between the UE process exiting
+    // and killing the AMF process, or it'll hit the same silently-missing
+    // AMF-side confirmation build #3 of the smoke-test workflow did.
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     amf_task.abort();
@@ -397,4 +582,4 @@ fn ngap_summary(msg: &NgapMessage) -> &'static str {
         NgapMessage::InitialContextSetupResponse(_) => "InitialContextSetupResponse",
         _ => "(other NGAP message)",
     }
-    }
+            }
