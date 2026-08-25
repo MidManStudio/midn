@@ -19,7 +19,8 @@
 #      their own Tokio task, talking ONLY through a real loopback
 #      UdpSocket. The log is checked for the actual protocol steps
 #      happening (SUCI sent, RES* verified, RegistrationAccept decrypted,
-#      etc.), not just "the process exited 0".
+#      the bundled default PDU session set up via InitialContextSetupRequest/
+#      Response, etc.), not just "the process exited 0".
 #
 # Deliberately a separate, workflow_dispatch-only workflow rather than
 # touching midn-test.yml's per-crate path-gated system — neither
@@ -126,7 +127,17 @@ jobs:
               ("UE:  sent IdentityResponse(SUCI)",              sim_log, "[UE ] -> IdentityResponse(SUCI)"),
               ("UE:  sent AuthenticationResponse (RES*)",       sim_log, "[UE ] -> AuthenticationResponse(RES*)"),
               ("UE:  sent SecurityModeComplete",                sim_log, "[UE ] -> SecurityModeComplete"),
+              # Phase B, added when midn-sim started bundling a default PDU
+              # session: RegistrationAccept now arrives piggybacked on
+              # InitialContextSetupRequest instead of DownlinkNasTransport —
+              # these two checks are the only real proof that actually
+              # happened, rather than the run silently falling back to a
+              # Phase A shape that would still pass every check below.
+              ("AMF: sent InitialContextSetupRequest (Phase B)", sim_log, "[AMF] -> InitialContextSetupRequest"),
+              ("AMF: bundled PDU session (N3Event::CreateSession)", sim_log, "N3Event: CreateSession"),
               ("UE:  decrypted RegistrationAccept",             sim_log, "[UE ] <- RegistrationAccept"),
+              ("UE:  sent InitialContextSetupResponse",         sim_log, "[UE ] -> InitialContextSetupResponse"),
+              ("AMF: recorded real DL TEID (N3Event::UpdateBearer)", sim_log, "N3Event: UpdateBearer"),
               ("UE:  sent RegistrationComplete",                sim_log, "[UE ] -> RegistrationComplete"),
               ("Overall: simulation reported success",          sim_log, "Full Registration procedure completed"),
           ]
