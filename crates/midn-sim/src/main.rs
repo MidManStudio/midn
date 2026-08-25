@@ -3,16 +3,20 @@
 //! goal: an AMF and a mock UE/gNB, in two independent Tokio tasks talking
 //! ONLY through a real `midn_transport::SctpLink` (real `UdpSocket`, real
 //! SCTP handshake via `rtc_sctp`) — not the in-process `Amf::process_ngap`
-//! calls every existing test uses. Drives the full Phase A Registration
-//! procedure: RegistrationRequest -> IdentityRequest/Response ->
-//! AuthenticationRequest/Response (real 5G-AKA) -> SecurityModeCommand/
-//! Complete -> (protected) RegistrationAccept -> RegistrationComplete.
+//! calls every existing test uses. Drives the full Registration procedure:
+//! RegistrationRequest -> IdentityRequest/Response -> AuthenticationRequest/
+//! Response (real 5G-AKA) -> SecurityModeCommand/Complete -> RegistrationAccept
+//! -> RegistrationComplete.
 //!
-//! Phase A only, deliberately — Phase B's `InitialContextSetupRequest`/
-//! `Response` have no `ngap::codec` wire support yet (struct-only, see
-//! that module's doc), and this binary only speaks real bytes on a real
-//! socket. Extending to Phase B is the natural next increment once that
-//! codec gap closes.
+//! Phase B (`AMF_UPF_N3_ADDR` below): RegistrationAccept + a bundled default
+//! PDU session arrive together via `InitialContextSetupRequest` instead of
+//! `DownlinkNasTransport`. The mock UE/gNB decrypts+verifies RegistrationAccept
+//! exactly as before, then additionally plays the gNB side of context setup:
+//! replies with `InitialContextSetupResponse` carrying a real (mock) DL TEID
+//! + gNB N3 address — the same exchange `amf::state_machine`'s own
+//! `full_registration_flow_phase_b_bundles_pdu_session_and_completes_ics`
+//! test already proves the AMF side handles correctly in-process, now over
+//! a real socket for the first time.
 //!
 //! Run: `cargo run -p midn-sim`
 //!
@@ -32,7 +36,8 @@ use midn_proto::nas5gs::{
     Nas5gsSecurityContext, Suci, NAS5GS_SHT_PLAIN,
 };
 use midn_proto::ngap::{
-    decode_ngap_pdu, encode_ngap_pdu, NgapInitialUeMessage, NgapMessage, NgapUplinkNasTransport,
+    decode_ngap_pdu, encode_ngap_pdu, NgapInitialContextSetupResponse, NgapInitialUeMessage,
+    NgapMessage, NgapUplinkNasTransport, PduSessionSetupItem,
 };
 use midn_transport::{LinkEvent, SctpLink};
 
@@ -48,6 +53,16 @@ const TEST_OPC: &str = "cd63cb71954a9f4e48a5994e37a02baf";
 const TEST_PLMN: [u8; 3] = [0x00, 0x11, 0x22];
 const TEST_TAI: [u8; 6] = [0x00, 0x11, 0x22, 0x00, 0x00, 0x01];
 const RAN_UE_NGAP_ID: u32 = 7;
+
+// ── Phase B material ─────────────────────────────────────────────────────────
+// Same values `amf::state_machine`'s Phase B test uses for the AMF-told UPF
+// address, plus fixed stand-ins for what a real gNB would allocate itself
+// on ICSResponse (this binary doesn't model a gNB user-plane stack at all —
+// same "no real allocator, fixed placeholder" simplification `ue_ip: [0;4]`
+// already makes in `amf::registration`, just on the UE/gNB side instead).
+const AMF_UPF_N3_ADDR: [u8; 4] = [10, 0, 0, 1];
+const GNB_N3_ADDR: [u8; 4] = [172, 16, 0, 5];
+const MOCK_DL_TEID: u32 = 0xAABB_CCDD;
 
 /// 38412 is the real, standardized NGAP-over-SCTP port (TS 38.412) —
 /// authenticity touch, not load-bearing: this binary's two sides only ever
@@ -91,7 +106,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 // ── AMF side ─────────────────────────────────────────────────────────────────
 
 async fn run_amf(bind_addr: SocketAddr) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut amf = midn_core::amf::Amf::new();
+    let mut amf = midn_core::amf::Amf::new().with_phase_b(AMF_UPF_N3_ADDR);
     amf.hss_mut().provision_hex(TEST_IMSI, TEST_K, TEST_OPC)?;
 
     println!("[AMF] binding {bind_addr}, waiting for an association...");
@@ -166,86 +181,154 @@ async fn run_ue(bind_addr: SocketAddr, amf_addr: SocketAddr) -> Result<(), Box<d
         };
 
         let ngap_msg = decode_ngap_pdu(&bytes)?;
-        let (aid, nas_pdu) = match ngap_msg {
-            NgapMessage::DownlinkNasTransport(dl) => (dl.amf_ue_ngap_id, dl.nas_pdu),
-            other => return Err(format!("unexpected NGAP message from AMF: {other:?}").into()),
-        };
-        let amf_ue_ngap_id = *amf_ue_ngap_id.get_or_insert(aid);
 
-        // Auto-detect plain vs protected exactly like `amf::state_machine::
-        // handle_uplink_nas` does on the other side — 5G's security header
-        // type lives in byte[1]'s low nibble (see nas5gs::codec module doc).
-        let sht = nas_pdu.get(1).map(|b| b & 0x0F).unwrap_or(0);
+        match ngap_msg {
+            NgapMessage::DownlinkNasTransport(dl) => {
+                let amf_ue_ngap_id = *amf_ue_ngap_id.get_or_insert(dl.amf_ue_ngap_id);
+                let nas_pdu = dl.nas_pdu;
 
-        if sht != NAS5GS_SHT_PLAIN {
-            // The only protected downlink message Phase A ever sends is
-            // RegistrationAccept.
-            let kamf = kamf.ok_or("received a protected PDU before KAMF was derived")?;
-            let mut nas_ctx = Nas5gsSecurityContext::new(&kamf, 2, 2);
-            let plain = decode_protected_downlink(&mut nas_ctx, &nas_pdu)
-                .ok_or("failed to decrypt/verify RegistrationAccept")?;
+                // Auto-detect plain vs protected exactly like `amf::state_machine::
+                // handle_uplink_nas` does on the other side — 5G's security header
+                // type lives in byte[1]'s low nibble (see nas5gs::codec module doc).
+                let sht = nas_pdu.get(1).map(|b| b & 0x0F).unwrap_or(0);
 
-            match decode_nas5gs(&plain)? {
-                Nas5gsPdu::RegistrationAccept(acc) => {
-                    println!("[UE ] <- RegistrationAccept (result={})", acc.registration_result);
-                    let complete = encode_registration_complete();
-                    send_uplink(&mut link, amf_ue_ngap_id, complete).await?;
-                    println!("[UE ] -> RegistrationComplete");
-                    println!("[UE ] registration complete — subscriber is online.");
-                    return Ok(());
+                if sht != NAS5GS_SHT_PLAIN {
+                    // The only protected downlink message this arm ever sees is
+                    // Phase A's RegistrationAccept — Phase B's RegistrationAccept
+                    // arrives via InitialContextSetupRequest instead (below).
+                    let kamf = kamf.ok_or("received a protected PDU before KAMF was derived")?;
+                    let mut nas_ctx = Nas5gsSecurityContext::new(&kamf, 2, 2);
+                    let plain = decode_protected_downlink(&mut nas_ctx, &nas_pdu)
+                        .ok_or("failed to decrypt/verify RegistrationAccept")?;
+
+                    match decode_nas5gs(&plain)? {
+                        Nas5gsPdu::RegistrationAccept(acc) => {
+                            println!("[UE ] <- RegistrationAccept (result={})", acc.registration_result);
+                            let complete = encode_registration_complete();
+                            send_uplink(&mut link, amf_ue_ngap_id, complete).await?;
+                            println!("[UE ] -> RegistrationComplete");
+                            println!("[UE ] registration complete — subscriber is online.");
+                            return Ok(());
+                        }
+                        other => return Err(format!("expected RegistrationAccept, got {other:?}").into()),
+                    }
                 }
-                other => return Err(format!("expected RegistrationAccept, got {other:?}").into()),
-            }
-        }
 
-        match decode_nas5gs(&nas_pdu)? {
-            Nas5gsPdu::IdentityRequest { .. } => {
-                println!("[UE ] <- IdentityRequest");
-                let suci = suci_for_imsi(TEST_IMSI);
-                let resp = encode_identity_response_suci(&suci);
-                send_uplink(&mut link, amf_ue_ngap_id, resp).await?;
-                println!("[UE ] -> IdentityResponse(SUCI)");
-            }
-            Nas5gsPdu::AuthenticationRequest(req) => {
-                println!("[UE ] <- AuthenticationRequest");
+                match decode_nas5gs(&nas_pdu)? {
+                    Nas5gsPdu::IdentityRequest { .. } => {
+                        println!("[UE ] <- IdentityRequest");
+                        let suci = suci_for_imsi(TEST_IMSI);
+                        let resp = encode_identity_response_suci(&suci);
+                        send_uplink(&mut link, amf_ue_ngap_id, resp).await?;
+                        println!("[UE ] -> IdentityResponse(SUCI)");
+                    }
+                    Nas5gsPdu::AuthenticationRequest(req) => {
+                        println!("[UE ] <- AuthenticationRequest");
 
-                let ki = midn_auth::AuthKey::from_hex(TEST_K)?;
-                let opc = midn_auth::OpCode::from_hex(TEST_OPC)?;
-                let ctx = midn_auth::MilenageContext::new(ki, opc);
-                let milenage_amf = midn_auth::keys::Amf([0x80, 0x00]);
-                let vector = ctx.generate_vector_with_rand(
-                    midn_auth::keys::Sqn::from_bytes(&sqn_used),
-                    milenage_amf,
-                    midn_auth::keys::Rand(req.rand),
+                        let ki = midn_auth::AuthKey::from_hex(TEST_K)?;
+                        let opc = midn_auth::OpCode::from_hex(TEST_OPC)?;
+                        let ctx = midn_auth::MilenageContext::new(ki, opc);
+                        let milenage_amf = midn_auth::keys::Amf([0x80, 0x00]);
+                        let vector = ctx.generate_vector_with_rand(
+                            midn_auth::keys::Sqn::from_bytes(&sqn_used),
+                            milenage_amf,
+                            midn_auth::keys::Rand(req.rand),
+                        );
+
+                        let snn = midn_core::kdf::serving_network_name(&TEST_PLMN);
+                        let res_star = midn_core::kdf::derive_res_star(
+                            &vector.ck, &vector.ik, &snn, &req.rand, &vector.res,
+                        );
+
+                        // Independently re-derive the SAME KAUSF -> KSEAF -> KAMF
+                        // chain the AMF is deriving on its own side right now —
+                        // proving the whole loop actually closes once
+                        // RegistrationAccept needs decrypting, same principle the
+                        // in-process tests already establish, just over real bytes
+                        // this time.
+                        let sqn_xor_ak: [u8; 6] = core::array::from_fn(|i| sqn_used[i] ^ vector.ak[i]);
+                        let kausf = midn_core::kdf::derive_kausf(&vector.ck, &vector.ik, &snn, &sqn_xor_ak);
+                        let kseaf = midn_core::kdf::derive_kseaf(&kausf, &snn);
+                        let supi = TEST_IMSI.to_string().into_bytes();
+                        kamf = Some(midn_core::kdf::derive_kamf(&kseaf, &supi, &[0x00, 0x00]));
+
+                        let resp = encode_auth_response(&res_star);
+                        send_uplink(&mut link, amf_ue_ngap_id, resp).await?;
+                        println!("[UE ] -> AuthenticationResponse(RES*)");
+                    }
+                    Nas5gsPdu::SecurityModeCommand(_) => {
+                        println!("[UE ] <- SecurityModeCommand");
+                        let resp = encode_sec_mode_complete();
+                        send_uplink(&mut link, amf_ue_ngap_id, resp).await?;
+                        println!("[UE ] -> SecurityModeComplete");
+                    }
+                    other => return Err(format!("unexpected plain NAS PDU: {other:?}").into()),
+                }
+            }
+
+            NgapMessage::InitialContextSetupRequest(icsr) => {
+                // Phase B: RegistrationAccept + the bundled default PDU
+                // session arrive together here instead of via
+                // DownlinkNasTransport. Mirrors `amf::state_machine`'s own
+                // `full_registration_flow_phase_b_bundles_pdu_session_and_completes_ics`
+                // test, over a real socket instead of in-process.
+                let amf_ue_ngap_id = *amf_ue_ngap_id.get_or_insert(icsr.amf_ue_ngap_id);
+                let ran_ue_ngap_id = icsr.ran_ue_ngap_id;
+
+                let kamf = kamf.ok_or("received InitialContextSetupRequest before KAMF was derived")?;
+                let nas_pdu = icsr
+                    .nas_pdu
+                    .ok_or("InitialContextSetupRequest with no piggybacked NAS PDU")?;
+                let mut nas_ctx = Nas5gsSecurityContext::new(&kamf, 2, 2);
+                let plain = decode_protected_downlink(&mut nas_ctx, &nas_pdu)
+                    .ok_or("failed to decrypt/verify RegistrationAccept")?;
+                let acc = match decode_nas5gs(&plain)? {
+                    Nas5gsPdu::RegistrationAccept(acc) => acc,
+                    other => return Err(format!("expected RegistrationAccept, got {other:?}").into()),
+                };
+                println!("[UE ] <- RegistrationAccept (result={})", acc.registration_result);
+
+                let session = icsr
+                    .pdu_sessions
+                    .first()
+                    .ok_or("InitialContextSetupRequest with no PDU session to set up")?;
+                let pdu_session_id = session.pdu_session_id;
+                let qfi = session.qfi;
+                let ul_teid = u32::from_be_bytes(session.gtp_teid);
+                let upf_addr = session.transport_layer_addr;
+                println!(
+                    "[UE ] <- bundled PDU session {pdu_session_id} (qfi={qfi}, UL TEID={ul_teid:08x}, UPF={upf_addr:?})"
                 );
 
-                let snn = midn_core::kdf::serving_network_name(&TEST_PLMN);
-                let res_star =
-                    midn_core::kdf::derive_res_star(&vector.ck, &vector.ik, &snn, &req.rand, &vector.res);
+                // gNodeB confirms the security context + PDU session: real
+                // DL TEID + gNB N3 address. No real gNB user-plane stack
+                // exists in this binary — GNB_N3_ADDR/MOCK_DL_TEID are fixed
+                // stand-ins, same "no real allocator, fixed placeholder"
+                // simplification AMF_UPF_N3_ADDR's own doc note already
+                // flags on the AMF side.
+                let icrsp = NgapMessage::InitialContextSetupResponse(NgapInitialContextSetupResponse {
+                    amf_ue_ngap_id,
+                    ran_ue_ngap_id,
+                    pdu_sessions_setup: vec![PduSessionSetupItem {
+                        pdu_session_id,
+                        transport_layer_addr: GNB_N3_ADDR,
+                        gtp_teid: MOCK_DL_TEID.to_be_bytes(),
+                    }],
+                    pdu_sessions_failed: vec![],
+                });
+                link.send(encode_ngap_pdu(&icrsp)?).await?;
+                println!("[UE ] -> InitialContextSetupResponse");
 
-                // Independently re-derive the SAME KAUSF -> KSEAF -> KAMF
-                // chain the AMF is deriving on its own side right now —
-                // proving the whole loop actually closes once
-                // RegistrationAccept needs decrypting, same principle the
-                // in-process tests already establish, just over real bytes
-                // this time.
-                let sqn_xor_ak: [u8; 6] = core::array::from_fn(|i| sqn_used[i] ^ vector.ak[i]);
-                let kausf = midn_core::kdf::derive_kausf(&vector.ck, &vector.ik, &snn, &sqn_xor_ak);
-                let kseaf = midn_core::kdf::derive_kseaf(&kausf, &snn);
-                let supi = TEST_IMSI.to_string().into_bytes();
-                kamf = Some(midn_core::kdf::derive_kamf(&kseaf, &supi, &[0x00, 0x00]));
+                let complete = encode_registration_complete();
+                send_uplink(&mut link, amf_ue_ngap_id, complete).await?;
+                println!("[UE ] -> RegistrationComplete");
+                println!(
+                    "[UE ] registration complete — subscriber is online, PDU session {pdu_session_id} up."
+                );
+                return Ok(());
+            }
 
-                let resp = encode_auth_response(&res_star);
-                send_uplink(&mut link, amf_ue_ngap_id, resp).await?;
-                println!("[UE ] -> AuthenticationResponse(RES*)");
-            }
-            Nas5gsPdu::SecurityModeCommand(_) => {
-                println!("[UE ] <- SecurityModeCommand");
-                let resp = encode_sec_mode_complete();
-                send_uplink(&mut link, amf_ue_ngap_id, resp).await?;
-                println!("[UE ] -> SecurityModeComplete");
-            }
-            other => return Err(format!("unexpected plain NAS PDU: {other:?}").into()),
+            other => return Err(format!("unexpected NGAP message from AMF: {other:?}").into()),
         }
     }
 }
@@ -298,4 +381,4 @@ fn ngap_summary(msg: &NgapMessage) -> &'static str {
         NgapMessage::InitialContextSetupResponse(_) => "InitialContextSetupResponse",
         _ => "(other NGAP message)",
     }
-                    }
+        }
