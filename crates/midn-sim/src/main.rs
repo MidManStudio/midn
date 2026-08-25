@@ -99,6 +99,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Err(e) => println!("\n❌ Simulation failed: {e}"),
     }
 
+    // `run_ue` returning Ok only means the UE's last two sends
+    // (InitialContextSetupResponse, RegistrationComplete) completed
+    // locally — UDP is fire-and-forget, so that's the send-side syscall
+    // finishing, not proof the AMF task has received, let alone processed,
+    // either one yet. Without this drain window, `amf_task.abort()` below
+    // can (and on build #3 of this workflow, did) kill the AMF task before
+    // it ever gets scheduled to consume those last two datagrams — the
+    // run still printed "success" because that line only reflects the UE
+    // side, while AMF-side confirmation (N3Event::UpdateBearer, the
+    // RegistrationComplete log line) silently never happened. Same
+    // approximate-not-exact tradeoff as the startup sleep above, just on
+    // the other end of the run; 200ms is generous relative to a couple of
+    // loopback UDP round trips + task wakeups, cheap against the
+    // workflow's 30s budget.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
     amf_task.abort();
     ue_result
 }
@@ -381,4 +397,4 @@ fn ngap_summary(msg: &NgapMessage) -> &'static str {
         NgapMessage::InitialContextSetupResponse(_) => "InitialContextSetupResponse",
         _ => "(other NGAP message)",
     }
-        }
+    }
