@@ -38,10 +38,11 @@
 use midn_ecs::{ImsiRegistry, World};
 use midn_proto::nas5gs::{decode_nas5gs, decode_protected, Nas5gsPdu, NAS5GS_SHT_PLAIN};
 use midn_proto::ngap::messages::{
-    NgapInitialContextSetupResponse, NgapMessage, NgapUplinkNasTransport,
+    NgapInitialContextSetupResponse, NgapMessage, NgapUeContextReleaseComplete,
+    NgapUplinkNasTransport,
 };
 
-use crate::amf::registration;
+use crate::amf::{deregistration, registration};
 use crate::hss::Hss;
 use crate::mme::TeidAllocator;
 
@@ -126,6 +127,7 @@ impl Amf {
             ),
             NgapMessage::UplinkNasTransport(unt) => self.handle_uplink_nas(unt),
             NgapMessage::InitialContextSetupResponse(icrsp) => self.handle_ics_response(icrsp),
+            NgapMessage::UeContextReleaseComplete(rel) => self.handle_release_complete(rel),
             _ => {
                 tracing::debug!("process_ngap: unhandled NGAP message variant (out of scope)");
                 (vec![], vec![])
@@ -182,6 +184,12 @@ impl Amf {
             Ok(Nas5gsPdu::RegistrationComplete) => registration::handle_registration_complete(
                 &mut self.world, amf_ue_ngap_id,
             ),
+            Ok(Nas5gsPdu::DeregistrationRequest { .. }) => {
+                let responses = deregistration::handle_deregistration_request(
+                    &mut self.world, ran_ue_ngap_id, amf_ue_ngap_id, &plain_pdu,
+                );
+                (responses, vec![])
+            }
             _ => {
                 tracing::warn!(amf_ue_ngap_id, "UplinkNasTransport: unknown or unsupported NAS PDU");
                 (vec![], vec![])
@@ -222,6 +230,37 @@ impl Amf {
         tracing::warn!(entity, "ICSResponse: no tunnel component — Phase A mode?");
         (vec![], vec![])
     }
+
+    /// gNodeB confirms UE context release — the tail end of deregistration
+    /// (or any other release trigger). Mirrors `mme::state_machine::
+    /// handle_release_complete` exactly: despawn, deregister the IMSI,
+    /// release the TEID if one was ever allocated (Phase A entities never
+    /// get one, so `ul_teid` is `None` and this degrades to a plain
+    /// despawn). Safe to call on an already-gone entity — every step here
+    /// is a no-op rather than a panic in that case.
+    fn handle_release_complete(
+        &mut self,
+        msg: NgapUeContextReleaseComplete,
+    ) -> (Vec<NgapMessage>, Vec<N3Event>) {
+        let entity = msg.amf_ue_ngap_id;
+
+        let ul_teid = self.world.tunnel(entity).map(|t| t.ul_teid);
+
+        if let Some(identity) = self.world.identity(entity) {
+            self.registry.deregister(identity.imsi);
+        }
+
+        self.world.despawn(entity);
+        tracing::info!(entity, "UeContextReleaseComplete — entity despawned");
+
+        match ul_teid {
+            Some(t) => {
+                self.teid_allocator.release(t);
+                (vec![], vec![N3Event::RemoveSession { ul_teid: t }])
+            }
+            None => (vec![], vec![]),
+        }
+    }
 }
 
 impl Default for Amf {
@@ -234,9 +273,13 @@ mod tests {
     use midn_auth::keys::{Amf as MilenageAmf, Rand, Sqn};
     use midn_auth::{AuthKey, MilenageContext, OpCode};
     use midn_ecs::AuthState;
-    use midn_proto::nas5gs::{encode_identity_response_suci, encode_registration_request, Suci};
+    use midn_proto::nas5gs::{
+        encode_deregistration_request, encode_identity_response_suci, encode_registration_request,
+        Suci,
+    };
     use midn_proto::ngap::messages::{
-        NgapInitialUeMessage, NgapInitialContextSetupResponse, PduSessionSetupItem,
+        NgapCause, NgapInitialContextSetupResponse, NgapInitialUeMessage,
+        NgapUeContextReleaseComplete, PduSessionSetupItem,
     };
 
     // Must round-trip through `registration::resolve_suci_to_imsi`'s 5-byte
@@ -500,6 +543,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn phase_b_deregistration_releases_teid_and_despawns_entity() {
+        let mut amf = test_amf_phase_b();
+
+        let (amf_ue_ngap_id, ran_ue_ngap_id, _kamf) =
+            run_through_security_mode_command(&mut amf, 7).await;
+
+        let sec_complete_pdu = midn_proto::nas5gs::encode_sec_mode_complete();
+        let (resp, events) = amf.process_ngap(uplink(ran_ue_ngap_id, amf_ue_ngap_id, sec_complete_pdu)).await;
+        assert_eq!(resp.len(), 1);
+        let icsr = match resp.into_iter().next().unwrap() {
+            NgapMessage::InitialContextSetupRequest(icsr) => icsr,
+            other => panic!("expected InitialContextSetupRequest, got {other:?}"),
+        };
+        let ul_teid = u32::from_be_bytes(icsr.pdu_sessions[0].gtp_teid);
+        assert!(matches!(&events[0], N3Event::CreateSession { .. }));
+        assert_eq!(amf.free_teid_count(), 0, "freshly allocated TEID is not free");
+        assert_eq!(amf.subscriber_count(), 1);
+
+        // gNodeB confirms the security context + PDU session — same
+        // exchange `full_registration_flow_phase_b_bundles_pdu_session_and_completes_ics`
+        // above already proves in detail; only needed here to get a real
+        // tunnel component onto the entity before deregistering it.
+        let icrsp = NgapMessage::InitialContextSetupResponse(NgapInitialContextSetupResponse {
+            amf_ue_ngap_id,
+            ran_ue_ngap_id,
+            pdu_sessions_setup: vec![PduSessionSetupItem {
+                pdu_session_id: 1,
+                transport_layer_addr: [172, 16, 0, 5],
+                gtp_teid: 0xAABB_CCDDu32.to_be_bytes(),
+            }],
+            pdu_sessions_failed: vec![],
+        });
+        amf.process_ngap(icrsp).await;
+
+        // DeregistrationAccept's own protected-envelope correctness is
+        // `deregistration::tests::deregistration_accept_is_protected_when_
+        // nas_security_is_active`'s job, not this test's — this one is
+        // about the release/teardown mechanics end to end.
+        let deregistration_pdu = encode_deregistration_request(false);
+        let (resp, events) = amf.process_ngap(uplink(ran_ue_ngap_id, amf_ue_ngap_id, deregistration_pdu)).await;
+        assert_eq!(resp.len(), 2, "expect DeregistrationAccept + UeContextReleaseCommand");
+        assert!(matches!(resp[0], NgapMessage::DownlinkNasTransport(_)));
+        assert!(matches!(resp[1], NgapMessage::UeContextReleaseCommand { cause: NgapCause::NasDeregister }));
+        assert!(events.is_empty(), "no N3Event until UeContextReleaseComplete");
+
+        let release_complete = NgapMessage::UeContextReleaseComplete(NgapUeContextReleaseComplete {
+            amf_ue_ngap_id, ran_ue_ngap_id,
+        });
+        let (resp, events) = amf.process_ngap(release_complete).await;
+        assert!(resp.is_empty());
+        match &events[0] {
+            N3Event::RemoveSession { ul_teid: t } => assert_eq!(*t, ul_teid),
+            other => panic!("expected RemoveSession, got {other:?}"),
+        }
+        assert_eq!(amf.subscriber_count(), 0, "entity despawned");
+        assert_eq!(amf.free_teid_count(), 1, "TEID returned to the free list");
+    }
+
+    #[tokio::test]
     async fn handle_auth_response_rejects_wrong_res_star() {
         let mut amf = test_amf();
         let (resp, _events) = amf.process_ngap(initial_ue_message(7)).await;
@@ -528,4 +630,4 @@ mod tests {
         assert!(resp.is_empty(), "unknown subscriber must not produce an AuthenticationRequest");
         assert!(events.is_empty());
     }
-}
+    }
