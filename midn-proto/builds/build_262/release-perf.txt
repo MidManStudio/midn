@@ -1,0 +1,312 @@
+warning: profiles for the non root package will be ignored, specify profiles at the workspace root:
+package:   /home/runner/work/midn/midn/crates/midn-userplane-ebpf/Cargo.toml
+workspace: /home/runner/work/midn/midn/Cargo.toml
+   Compiling syn v3.0.4
+   Compiling crypto-common v0.1.7
+   Compiling serde_core v1.0.229
+   Compiling semver v1.0.28
+   Compiling cipher v0.4.4
+   Compiling rustc_version v0.4.1
+   Compiling block-buffer v0.10.4
+   Compiling scopeguard v1.2.0
+   Compiling thiserror v2.0.20
+   Compiling heapless v0.7.17
+   Compiling lock_api v0.4.14
+   Compiling digest v0.10.7
+   Compiling byteorder v1.5.0
+   Compiling spin v0.9.9
+   Compiling hash32 v0.2.1
+   Compiling thiserror v1.0.69
+   Compiling stable_deref_trait v1.2.1
+   Compiling aes v0.8.4
+   Compiling socket2 v0.6.5
+   Compiling mio v1.2.2
+   Compiling dbl v0.3.2
+   Compiling thiserror-impl v1.0.69
+   Compiling serde_derive v1.0.229
+   Compiling thiserror-impl v2.0.20
+   Compiling serde_json v1.0.151
+   Compiling bytes v1.12.1
+   Compiling cobs v0.3.0
+   Compiling pin-project-lite v0.2.17
+   Compiling tokio v1.53.1
+   Compiling midn-auth v0.1.0 (/home/runner/work/midn/midn/crates/midn-auth)
+   Compiling cmac v0.7.2
+   Compiling sha2 v0.10.9
+   Compiling hmac v0.12.1
+   Compiling ctr v0.9.2
+   Compiling serde v1.0.229
+   Compiling tinytemplate v1.2.1
+   Compiling postcard v1.1.3
+   Compiling ciborium v0.2.2
+   Compiling criterion v0.5.1
+   Compiling midn-proto v0.1.0 (/home/runner/work/midn/midn/crates/midn-proto)
+    Finished `release` profile [optimized] target(s) in 27.60s
+     Running unittests src/lib.rs (target/release/deps/midn_proto-2ed9d511f33852ae)
+
+running 125 tests
+test gtp::header::tests::echo_request_is_not_gpdu ... ok
+test gtp::header::tests::new_gpdu_flags_are_standard ... ok
+test gtp::header::tests::parse_gpdu_teid_deadbeef ... ok
+test gtp::header::tests::round_trip_serialization ... ok
+test gtp::parser::tests::parse_empty_returns_none ... ok
+test gtp::parser::tests::parse_gpdu_no_optional_fields ... ok
+test gtp::parser::tests::parse_echo_request ... ok
+test gtp::parser::tests::parse_gpdu_with_sequence_number_flag ... ok
+test gtp::header::tests::parse_too_short_returns_none ... ok
+test gtp::parser::tests::parse_too_short_for_header ... ok
+test nas5gs::codec::tests::auth_reject_decode ... ok
+test nas5gs::codec::tests::auth_request_round_trip ... ok
+test nas5gs::codec::tests::decode_protected_rejects_plain_sht ... ok
+test nas5gs::codec::tests::decode_protected_rejects_tampered_envelope ... ok
+test nas5gs::codec::tests::decode_protected_rejects_too_short ... ok
+test nas5gs::codec::tests::decode_rejects_protected_sht ... ok
+test nas5gs::codec::tests::decode_rejects_too_short ... ok
+test nas5gs::codec::tests::auth_response_round_trip_res_star_is_16_bytes ... ok
+test nas5gs::codec::tests::decode_protected_wrong_direction_rejects_even_untampered_envelope ... ok
+test nas5gs::codec::tests::decode_rejects_wrong_epd ... ok
+test nas5gs::codec::tests::deregistration_accept_decode ... ok
+test nas5gs::codec::tests::deregistration_request_round_trip ... ok
+test nas5gs::codec::tests::identity_request_round_trip ... ok
+test nas5gs::codec::tests::identity_response_guti_round_trip ... ok
+test nas5gs::codec::tests::identity_response_pei_round_trip ... ok
+test nas5gs::codec::tests::identity_response_suci_round_trip ... ok
+test nas5gs::codec::tests::protected_envelope_advances_counts_independently_per_direction ... ok
+test nas5gs::codec::tests::protected_envelope_round_trip ... ok
+test nas5gs::codec::tests::registration_accept_round_trip_empty_tai_list ... ok
+test nas5gs::codec::tests::registration_accept_round_trip_with_tai_list ... ok
+test nas5gs::codec::tests::registration_complete_decode ... ok
+test nas5gs::codec::tests::registration_request_round_trip_with_guti ... ok
+test nas5gs::codec::tests::registration_reject_round_trip ... ok
+test nas5gs::codec::tests::registration_request_round_trip_without_guti ... ok
+test nas5gs::codec::tests::sec_mode_command_round_trip ... ok
+test nas5gs::codec::tests::sec_mode_complete_decode ... ok
+test nas5gs::messages::tests::authentication_response_res_star_is_16_bytes ... ok
+test nas5gs::messages::tests::authentication_request_fields ... ok
+test nas5gs::messages::tests::suci_null_scheme_shape ... ok
+test nas5gs::security::tests::context_protect_downlink_is_verifiable_independently ... ok
+test nas5gs::security::tests::context_unprotect_uplink_rejects_bad_mac ... ok
+test nas5gs::security::tests::context_unprotect_uplink_round_trip ... ok
+test nas5gs::security::tests::derive_nas_keys_changes_with_algorithm_id ... ok
+test nas5gs::security::tests::derive_nas_keys_changes_with_kamf ... ok
+test nas5gs::security::tests::kamf_kdf_official_test_vectors ... ignored, TS 33.501 Annex A.8 official test vectors not yet sourced — fill in real (KAMF, algorithm distinguisher, algorithm identity) -> key values from spec Annex A.8 or a known-good reference implementation
+test nas5gs::security::tests::network_downlink_is_opened_by_ue_role_unprotect_downlink ... ok
+test nas5gs::security::tests::derive_nas_keys_is_deterministic ... ok
+test nas5gs::security::tests::network_downlink_is_not_opened_by_wrong_direction ... ok
+test nas5gs::security::tests::derive_nas_keys_enc_and_int_differ ... ok
+test nas5gs::security::tests::null_algorithms_pass_through_unciphered ... ok
+test nas::codec::tests::attach_accept_with_ip ... ok
+test nas::codec::tests::attach_complete_decode ... ok
+test nas::codec::tests::attach_request_imsi_round_trip ... ok
+test nas::codec::tests::auth_request_round_trip ... ok
+test nas::codec::tests::auth_response_round_trip ... ok
+test nas::codec::tests::decode_protected_recovers_inner_plain_nas_pdu ... ok
+test nas::codec::tests::decode_protected_rejects_plain_sht ... ok
+test nas::codec::tests::decode_protected_rejects_tampered_envelope ... ok
+test nas::codec::tests::decode_protected_rejects_too_short_buffer ... ok
+test nas::codec::tests::decode_rejects_wrong_pd ... ok
+test nas::codec::tests::detach_accept_decode ... ok
+test nas::codec::tests::detach_request_round_trip_normal ... ok
+test nas::codec::tests::detach_request_switch_off_flag_round_trips ... ok
+test nas::codec::tests::encode_protected_envelope_is_well_formed_and_verifiable ... ok
+test nas::codec::tests::sec_mode_command_round_trip ... ok
+test nas::codec::tests::security_mode_complete_decode ... ok
+test nas::ie::tests::decode_imsi_rejects_wrong_type ... ok
+test nas::ie::tests::imsi_encode_identity_type_is_imsi ... ok
+test nas::ie::tests::imsi_encode_odd_flag_set_for_15_digits ... ok
+test nas::ie::tests::imsi_encode_produces_8_bytes ... ok
+test nas::ie::tests::imsi_round_trip_standard ... ok
+test nas::ie::tests::imsi_round_trip_with_leading_zeros ... ok
+test nas::ie::tests::lv_round_trip ... ok
+test nas::ie::tests::security_algorithms_round_trip ... ok
+test nas::ie::tests::tlv_round_trip ... ok
+test nas::messages::tests::auth_request_round_trip_fields ... ok
+test nas::security::tests::context_protect_downlink_is_verifiable_independently ... ok
+test nas::security::tests::context_unprotect_uplink_rejects_bad_mac ... ok
+test nas::security::tests::context_unprotect_uplink_round_trip ... ok
+test nas::security::tests::eea0_eia0_null_algorithms_pass_through_unciphered ... ok
+test nas::security::tests::eea2_different_direction_gives_different_ciphertext ... ok
+test nas::security::tests::eea2_different_count_gives_different_ciphertext ... ok
+test nas::security::tests::eea2_round_trip_recovers_plaintext ... ok
+test nas::security::tests::eia2_mac_changes_with_count ... ok
+test nas::security::tests::eia2_mac_is_deterministic ... ok
+test nas::security::tests::eia2_verify_accepts_correct_mac ... ok
+test nas::security::tests::eia2_verify_rejects_tampered_mac ... ok
+test nas::security::tests::eia2_verify_rejects_tampered_message ... ok
+test nas::security::tests::kdf_changes_with_kasme ... ok
+test nas::security::tests::kdf_is_deterministic ... ok
+test nas::security::tests::kdf_enc_and_int_keys_differ ... ok
+test nas::security::tests::official_3gpp_test_vectors ... ignored, fill in real 3GPP TS 35.216 (128-EEA2) / TS 35.217 (128-EIA2) test vectors
+test nas::security::tests::reconstruct_count_handles_wraparound ... ok
+test nas::security::tests::reconstruct_count_no_wrap ... ok
+test nas::security::tests::reconstruct_count_same_high_bits_when_byte_increases ... ok
+test ngap::codec::tests::decode_rejects_truncated_buffer ... ok
+test nas5gs::security::tests::new_derives_same_keys_new_from_keys_would_need_precomputed ... ok
+test ngap::codec::tests::decode_rejects_unknown_procedure_code ... ok
+test nas5gs::security::tests::ue_uplink_is_opened_by_network_role_unprotect_uplink ... ok
+test ngap::codec::tests::downlink_nas_transport_round_trip ... ok
+test ngap::codec::tests::initial_context_setup_request_round_trip ... ok
+test ngap::codec::tests::initial_context_setup_request_and_response_share_procedure_code_but_not_choice ... ok
+test ngap::codec::tests::initial_ue_message_round_trip ... ok
+test ngap::codec::tests::unsupported_variant_returns_error_not_garbage ... ok
+test ngap::codec::tests::initial_context_setup_request_round_trip_no_pdu_session_no_nas_pdu ... ok
+test per::tests::constrained_int_3_bits_exact_byte ... ok
+test ngap::codec::tests::uplink_nas_transport_round_trip ... ok
+test per::tests::constrained_int_round_trip_24_bit_range ... ok
+test ngap::codec::tests::user_location_info_round_trip ... ok
+test per::tests::constrained_int_round_trip_boundary_256_257 ... ok
+test per::tests::constrained_int_round_trip_full_u32_range ... ok
+test per::tests::degenerate_single_value_range_consumes_zero_bits ... ok
+test per::tests::length_determinant_round_trip_medium_form ... ok
+test per::tests::large_range_is_octet_aligned ... ok
+test per::tests::length_determinant_short_form_exact_byte ... ok
+test ngap::codec::tests::initial_context_setup_response_round_trip ... ok
+test per::tests::octet_string_round_trip ... ok
+test s1ap::codec::tests::decode_rejects_truncated_buffer ... ok
+test s1ap::codec::tests::decode_rejects_unknown_procedure_code ... ok
+test per::tests::read_past_end_returns_none ... ok
+test per::tests::small_range_is_not_octet_aligned ... ok
+test s1ap::codec::tests::downlink_nas_transport_round_trip ... ok
+test s1ap::codec::tests::initial_ue_message_round_trip ... ok
+test s1ap::codec::tests::unsupported_variant_returns_error_not_garbage ... ok
+test s1ap::codec::tests::uplink_nas_transport_round_trip ... ok
+
+successes:
+
+successes:
+    gtp::header::tests::echo_request_is_not_gpdu
+    gtp::header::tests::new_gpdu_flags_are_standard
+    gtp::header::tests::parse_gpdu_teid_deadbeef
+    gtp::header::tests::parse_too_short_returns_none
+    gtp::header::tests::round_trip_serialization
+    gtp::parser::tests::parse_echo_request
+    gtp::parser::tests::parse_empty_returns_none
+    gtp::parser::tests::parse_gpdu_no_optional_fields
+    gtp::parser::tests::parse_gpdu_with_sequence_number_flag
+    gtp::parser::tests::parse_too_short_for_header
+    nas5gs::codec::tests::auth_reject_decode
+    nas5gs::codec::tests::auth_request_round_trip
+    nas5gs::codec::tests::auth_response_round_trip_res_star_is_16_bytes
+    nas5gs::codec::tests::decode_protected_rejects_plain_sht
+    nas5gs::codec::tests::decode_protected_rejects_tampered_envelope
+    nas5gs::codec::tests::decode_protected_rejects_too_short
+    nas5gs::codec::tests::decode_protected_wrong_direction_rejects_even_untampered_envelope
+    nas5gs::codec::tests::decode_rejects_protected_sht
+    nas5gs::codec::tests::decode_rejects_too_short
+    nas5gs::codec::tests::decode_rejects_wrong_epd
+    nas5gs::codec::tests::deregistration_accept_decode
+    nas5gs::codec::tests::deregistration_request_round_trip
+    nas5gs::codec::tests::identity_request_round_trip
+    nas5gs::codec::tests::identity_response_guti_round_trip
+    nas5gs::codec::tests::identity_response_pei_round_trip
+    nas5gs::codec::tests::identity_response_suci_round_trip
+    nas5gs::codec::tests::protected_envelope_advances_counts_independently_per_direction
+    nas5gs::codec::tests::protected_envelope_round_trip
+    nas5gs::codec::tests::registration_accept_round_trip_empty_tai_list
+    nas5gs::codec::tests::registration_accept_round_trip_with_tai_list
+    nas5gs::codec::tests::registration_complete_decode
+    nas5gs::codec::tests::registration_reject_round_trip
+    nas5gs::codec::tests::registration_request_round_trip_with_guti
+    nas5gs::codec::tests::registration_request_round_trip_without_guti
+    nas5gs::codec::tests::sec_mode_command_round_trip
+    nas5gs::codec::tests::sec_mode_complete_decode
+    nas5gs::messages::tests::authentication_request_fields
+    nas5gs::messages::tests::authentication_response_res_star_is_16_bytes
+    nas5gs::messages::tests::suci_null_scheme_shape
+    nas5gs::security::tests::context_protect_downlink_is_verifiable_independently
+    nas5gs::security::tests::context_unprotect_uplink_rejects_bad_mac
+    nas5gs::security::tests::context_unprotect_uplink_round_trip
+    nas5gs::security::tests::derive_nas_keys_changes_with_algorithm_id
+    nas5gs::security::tests::derive_nas_keys_changes_with_kamf
+    nas5gs::security::tests::derive_nas_keys_enc_and_int_differ
+    nas5gs::security::tests::derive_nas_keys_is_deterministic
+    nas5gs::security::tests::network_downlink_is_not_opened_by_wrong_direction
+    nas5gs::security::tests::network_downlink_is_opened_by_ue_role_unprotect_downlink
+    nas5gs::security::tests::new_derives_same_keys_new_from_keys_would_need_precomputed
+    nas5gs::security::tests::null_algorithms_pass_through_unciphered
+    nas5gs::security::tests::ue_uplink_is_opened_by_network_role_unprotect_uplink
+    nas::codec::tests::attach_accept_with_ip
+    nas::codec::tests::attach_complete_decode
+    nas::codec::tests::attach_request_imsi_round_trip
+    nas::codec::tests::auth_request_round_trip
+    nas::codec::tests::auth_response_round_trip
+    nas::codec::tests::decode_protected_recovers_inner_plain_nas_pdu
+    nas::codec::tests::decode_protected_rejects_plain_sht
+    nas::codec::tests::decode_protected_rejects_tampered_envelope
+    nas::codec::tests::decode_protected_rejects_too_short_buffer
+    nas::codec::tests::decode_rejects_wrong_pd
+    nas::codec::tests::detach_accept_decode
+    nas::codec::tests::detach_request_round_trip_normal
+    nas::codec::tests::detach_request_switch_off_flag_round_trips
+    nas::codec::tests::encode_protected_envelope_is_well_formed_and_verifiable
+    nas::codec::tests::sec_mode_command_round_trip
+    nas::codec::tests::security_mode_complete_decode
+    nas::ie::tests::decode_imsi_rejects_wrong_type
+    nas::ie::tests::imsi_encode_identity_type_is_imsi
+    nas::ie::tests::imsi_encode_odd_flag_set_for_15_digits
+    nas::ie::tests::imsi_encode_produces_8_bytes
+    nas::ie::tests::imsi_round_trip_standard
+    nas::ie::tests::imsi_round_trip_with_leading_zeros
+    nas::ie::tests::lv_round_trip
+    nas::ie::tests::security_algorithms_round_trip
+    nas::ie::tests::tlv_round_trip
+    nas::messages::tests::auth_request_round_trip_fields
+    nas::security::tests::context_protect_downlink_is_verifiable_independently
+    nas::security::tests::context_unprotect_uplink_rejects_bad_mac
+    nas::security::tests::context_unprotect_uplink_round_trip
+    nas::security::tests::eea0_eia0_null_algorithms_pass_through_unciphered
+    nas::security::tests::eea2_different_count_gives_different_ciphertext
+    nas::security::tests::eea2_different_direction_gives_different_ciphertext
+    nas::security::tests::eea2_round_trip_recovers_plaintext
+    nas::security::tests::eia2_mac_changes_with_count
+    nas::security::tests::eia2_mac_is_deterministic
+    nas::security::tests::eia2_verify_accepts_correct_mac
+    nas::security::tests::eia2_verify_rejects_tampered_mac
+    nas::security::tests::eia2_verify_rejects_tampered_message
+    nas::security::tests::kdf_changes_with_kasme
+    nas::security::tests::kdf_enc_and_int_keys_differ
+    nas::security::tests::kdf_is_deterministic
+    nas::security::tests::reconstruct_count_handles_wraparound
+    nas::security::tests::reconstruct_count_no_wrap
+    nas::security::tests::reconstruct_count_same_high_bits_when_byte_increases
+    ngap::codec::tests::decode_rejects_truncated_buffer
+    ngap::codec::tests::decode_rejects_unknown_procedure_code
+    ngap::codec::tests::downlink_nas_transport_round_trip
+    ngap::codec::tests::initial_context_setup_request_and_response_share_procedure_code_but_not_choice
+    ngap::codec::tests::initial_context_setup_request_round_trip
+    ngap::codec::tests::initial_context_setup_request_round_trip_no_pdu_session_no_nas_pdu
+    ngap::codec::tests::initial_context_setup_response_round_trip
+    ngap::codec::tests::initial_ue_message_round_trip
+    ngap::codec::tests::unsupported_variant_returns_error_not_garbage
+    ngap::codec::tests::uplink_nas_transport_round_trip
+    ngap::codec::tests::user_location_info_round_trip
+    per::tests::constrained_int_3_bits_exact_byte
+    per::tests::constrained_int_round_trip_24_bit_range
+    per::tests::constrained_int_round_trip_boundary_256_257
+    per::tests::constrained_int_round_trip_full_u32_range
+    per::tests::degenerate_single_value_range_consumes_zero_bits
+    per::tests::large_range_is_octet_aligned
+    per::tests::length_determinant_round_trip_medium_form
+    per::tests::length_determinant_short_form_exact_byte
+    per::tests::octet_string_round_trip
+    per::tests::read_past_end_returns_none
+    per::tests::small_range_is_not_octet_aligned
+    s1ap::codec::tests::decode_rejects_truncated_buffer
+    s1ap::codec::tests::decode_rejects_unknown_procedure_code
+    s1ap::codec::tests::downlink_nas_transport_round_trip
+    s1ap::codec::tests::initial_ue_message_round_trip
+    s1ap::codec::tests::unsupported_variant_returns_error_not_garbage
+    s1ap::codec::tests::uplink_nas_transport_round_trip
+
+test result: ok. 123 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+   Doc-tests midn_proto
+
+running 0 tests
+
+successes:
+
+successes:
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

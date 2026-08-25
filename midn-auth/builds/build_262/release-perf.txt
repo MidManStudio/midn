@@ -1,0 +1,181 @@
+warning: profiles for the non root package will be ignored, specify profiles at the workspace root:
+package:   /home/runner/work/midn/midn/crates/midn-userplane-ebpf/Cargo.toml
+workspace: /home/runner/work/midn/midn/Cargo.toml
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.24
+   Compiling zerocopy v0.8.56
+   Compiling cfg-if v1.0.4
+   Compiling libc v0.2.189
+   Compiling version_check v0.9.5
+   Compiling serde_core v1.0.229
+   Compiling generic-array v0.14.7
+   Compiling crossbeam-utils v0.8.22
+   Compiling typenum v1.20.1
+   Compiling crossbeam-epoch v0.9.20
+   Compiling syn v2.0.119
+   Compiling syn v3.0.4
+   Compiling zmij v1.0.23
+   Compiling autocfg v1.5.1
+   Compiling crossbeam-deque v0.8.7
+   Compiling serde v1.0.229
+   Compiling num-traits v0.2.19
+   Compiling getrandom v0.2.17
+   Compiling rayon-core v1.13.0
+   Compiling serde_derive v1.0.229
+   Compiling serde_json v1.0.151
+   Compiling either v1.18.0
+   Compiling rand_core v0.6.4
+   Compiling inout v0.1.4
+   Compiling crypto-common v0.1.7
+   Compiling ciborium-io v0.2.2
+   Compiling regex-syntax v0.8.11
+   Compiling memchr v2.8.3
+   Compiling plotters-backend v0.3.7
+   Compiling anstyle v1.0.14
+   Compiling zerocopy-derive v0.8.56
+   Compiling zeroize_derive v1.5.0
+   Compiling itoa v1.0.18
+   Compiling clap_lex v1.1.0
+   Compiling clap_builder v4.6.6
+   Compiling zeroize v1.9.0
+   Compiling regex-automata v0.4.18
+   Compiling plotters-svg v0.3.7
+   Compiling cipher v0.4.4
+   Compiling itertools v0.10.5
+   Compiling half v2.7.1
+   Compiling ppv-lite86 v0.2.21
+   Compiling ciborium-ll v0.2.2
+   Compiling same-file v1.0.6
+   Compiling rand_chacha v0.3.1
+   Compiling cast v0.3.0
+   Compiling cpufeatures v0.2.17
+   Compiling rand v0.8.8
+   Compiling criterion-plot v0.5.0
+   Compiling aes v0.8.4
+   Compiling walkdir v2.5.0
+   Compiling ciborium v0.2.2
+   Compiling rayon v1.12.0
+   Compiling regex v1.13.1
+   Compiling plotters v0.3.7
+   Compiling clap v4.6.6
+   Compiling tinytemplate v1.2.1
+   Compiling is-terminal v0.4.17
+   Compiling keccak v0.1.6
+   Compiling anes v0.1.6
+   Compiling once_cell v1.21.4
+   Compiling subtle v2.6.1
+   Compiling oorandom v11.1.5
+   Compiling hex v0.4.3
+   Compiling midn-auth v0.1.0 (/home/runner/work/midn/midn/crates/midn-auth)
+   Compiling criterion v0.5.1
+    Finished `release` profile [optimized] target(s) in 33.27s
+     Running unittests src/lib.rs (target/release/deps/midn_auth-a8809ec24f84d4ee)
+
+running 39 tests
+test keys::tests::auth_key_from_hex_rejects_short ... ok
+test keys::tests::auth_key_from_hex_roundtrip ... ok
+test keys::tests::sqn_increment_wraps ... ok
+test milenage::tests::autn_structure_set1 ... ok
+test milenage::tests::generate_vector_and_with_rand_agree ... ok
+test keys::tests::sqn_round_trip ... ok
+test milenage::tests::generate_vector_returns_nonzero_rand_probable ... ok
+test milenage::tests::new_and_with_op_agree ... ok
+test milenage::tests::opc_derivation_set4 ... ok
+test milenage::tests::opc_derivation_set3 ... ok
+test milenage::tests::opc_derivation_set5 ... ok
+test milenage::tests::opc_derivation_set1 ... ok
+test milenage::tests::opc_derivation_set6 ... ok
+test milenage::tests::test_set_1 ... ok
+test milenage::tests::test_set_3 ... ok
+test milenage::tests::test_set_4 ... ok
+test milenage::tests::test_set_5 ... ok
+test milenage::tests::test_set_2 ... ok
+test milenage::tests::test_set_6 ... ok
+test milenage::tests::verify_res_mismatch_returns_false ... ok
+test milenage::tests::verify_res_all_zeros_vs_nonzero ... ok
+test tuak::algorithm::tests::config_is_plain_data ... ok
+test milenage::tests::verify_res_match_returns_true ... ok
+test tuak::algorithm::tests::official_ts35232_test_vectors ... ignored, TS 35.231 algorithm construction not yet implemented — see module docs
+test tuak::keccak_p::tests::distinct_inputs_give_distinct_outputs ... ok
+test tuak::keccak_p::tests::permutation_is_deterministic ... ok
+test tuak::keccak_p::tests::permutation_of_zero_state_is_not_identity ... ok
+test tuak::sponge::tests::absorb_after_squeeze_panics - should panic ... ok
+test tuak::keccak_p::tests::permutation_changes_every_lane_eventually ... ok
+test tuak::sponge::tests::distinct_inputs_give_distinct_output ... ok
+test tuak::sponge::tests::incremental_squeeze_matches_one_shot ... ok
+test tuak::sponge::tests::pad_empty_input_fills_whole_block ... ok
+test tuak::sponge::tests::single_bit_input_change_changes_output ... ok
+test tuak::sponge::tests::pad_exact_multiple_of_rate_adds_full_extra_block ... ok
+test tuak::sponge::tests::pad_exactly_one_byte_short_uses_0x81 ... ok
+test tuak::sponge::tests::sponge_is_deterministic ... ok
+test tuak::sponge::tests::squeeze_longer_than_rate_continues_correctly ... ok
+test tuak::sponge::tests::squeeze_output_has_requested_length ... ok
+test tuak::sponge::tests::zero_rate_panics - should panic ... ok
+
+successes:
+
+---- tuak::sponge::tests::absorb_after_squeeze_panics stdout ----
+
+thread 'tuak::sponge::tests::absorb_after_squeeze_panics' (9104) panicked at crates/midn-auth/src/tuak/sponge.rs:64:9:
+cannot absorb after squeeze has begun
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- tuak::sponge::tests::zero_rate_panics stdout ----
+
+thread 'tuak::sponge::tests::zero_rate_panics' (9114) panicked at crates/midn-auth/src/tuak/sponge.rs:46:9:
+rate_bytes must be in 1..=200, got 0
+
+
+successes:
+    keys::tests::auth_key_from_hex_rejects_short
+    keys::tests::auth_key_from_hex_roundtrip
+    keys::tests::sqn_increment_wraps
+    keys::tests::sqn_round_trip
+    milenage::tests::autn_structure_set1
+    milenage::tests::generate_vector_and_with_rand_agree
+    milenage::tests::generate_vector_returns_nonzero_rand_probable
+    milenage::tests::new_and_with_op_agree
+    milenage::tests::opc_derivation_set1
+    milenage::tests::opc_derivation_set3
+    milenage::tests::opc_derivation_set4
+    milenage::tests::opc_derivation_set5
+    milenage::tests::opc_derivation_set6
+    milenage::tests::test_set_1
+    milenage::tests::test_set_2
+    milenage::tests::test_set_3
+    milenage::tests::test_set_4
+    milenage::tests::test_set_5
+    milenage::tests::test_set_6
+    milenage::tests::verify_res_all_zeros_vs_nonzero
+    milenage::tests::verify_res_match_returns_true
+    milenage::tests::verify_res_mismatch_returns_false
+    tuak::algorithm::tests::config_is_plain_data
+    tuak::keccak_p::tests::distinct_inputs_give_distinct_outputs
+    tuak::keccak_p::tests::permutation_changes_every_lane_eventually
+    tuak::keccak_p::tests::permutation_is_deterministic
+    tuak::keccak_p::tests::permutation_of_zero_state_is_not_identity
+    tuak::sponge::tests::absorb_after_squeeze_panics
+    tuak::sponge::tests::distinct_inputs_give_distinct_output
+    tuak::sponge::tests::incremental_squeeze_matches_one_shot
+    tuak::sponge::tests::pad_empty_input_fills_whole_block
+    tuak::sponge::tests::pad_exact_multiple_of_rate_adds_full_extra_block
+    tuak::sponge::tests::pad_exactly_one_byte_short_uses_0x81
+    tuak::sponge::tests::single_bit_input_change_changes_output
+    tuak::sponge::tests::sponge_is_deterministic
+    tuak::sponge::tests::squeeze_longer_than_rate_continues_correctly
+    tuak::sponge::tests::squeeze_output_has_requested_length
+    tuak::sponge::tests::zero_rate_panics
+
+test result: ok. 38 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests midn_auth
+
+running 0 tests
+
+successes:
+
+successes:
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
