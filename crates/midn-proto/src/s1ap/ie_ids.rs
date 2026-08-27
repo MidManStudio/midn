@@ -3,17 +3,28 @@
 //!
 //! ⚠️ CONFIDENCE LEVELS — read before trusting these against real hardware.
 //!
-//! These numeric IDs come from memory of the public S1AP ASN.1 module
-//! (`S1AP-Constants`), not from a fetched copy of TS 36.413 in this session.
-//! Same caution this project already applies to crypto test vectors: I'm not
-//! going to dress up "best recollection" as "verified spec fact". Each
-//! constant below is tagged with how confident I actually am. A wrong value
-//! here is a one-line fix in this file — it doesn't touch the PER bit-packing
-//! engine (`per.rs`) or the IE-container framing (`codec.rs`) at all.
+//! The original 8 constants below (Criticality, the 3 Class-2 ProcedureCodes,
+//! MME-UE-S1AP-ID/eNB-UE-S1AP-ID/NAS-PDU, plus the 3 UNVERIFIED entries) came
+//! from memory of the public S1AP ASN.1 module, not a fetched copy of
+//! TS 36.413 — see the per-entry confidence notes below, unchanged from
+//! then.
+//!
+//! The InitialContextSetup block (added when that message got PER codec
+//! support) was checked directly against Wireshark's real
+//! `S1AP-Constants.asn`/`S1AP-IEs.asn` (fetched from Wireshark's GitHub
+//! mirror, itself generated from 3GPP TS 36.413's actual ASN.1 — same
+//! verification approach `ngap::ie_ids` already used and whose track record
+//! held up exactly: every existing NGAP constant checked out correct). All
+//! of `PROC_INITIAL_CONTEXT_SETUP`, `ID_E_RAB_TO_BE_SETUP_LIST_CTXT_SU_REQ`,
+//! `ID_E_RAB_SETUP_LIST_CTXT_SU_RES`, `ID_E_RAB_FAILED_TO_SETUP_LIST_CTXT_SU_RES`,
+//! `ID_UE_AGGREGATE_MAXIMUM_BITRATE`, `ID_SECURITY_KEY`, `ERAB_ID_MAX`,
+//! `QCI_MAX`, and `BIT_RATE_MAX` are from that source, not recollection —
+//! confidently correct, not "best guess" like the UNVERIFIED block still is.
 //!
 //! Before connecting to real RAN equipment: capture a real S1AP exchange
 //! (Wireshark dissects it natively) and diff against what this codec
-//! produces/expects, starting with the `// UNVERIFIED` entries.
+//! produces/expects, starting with the `// UNVERIFIED` entries — those are
+//! still the ones that haven't had this treatment.
 
 // ── Criticality (S1AP-CommonDataTypes) ───────────────────────────────────────
 // Criticality ::= ENUMERATED { reject, ignore, notify } — confident, this
@@ -28,6 +39,9 @@ pub const PROC_DOWNLINK_NAS_TRANSPORT: u32 = 11;
 pub const PROC_INITIAL_UE_MESSAGE: u32 = 12;
 pub const PROC_UPLINK_NAS_TRANSPORT: u32 = 13;
 
+// Verified against Wireshark's real S1AP-Constants.asn — see module doc.
+pub const PROC_INITIAL_CONTEXT_SETUP: u32 = 9;
+
 // ── ProtocolIE-ID (S1AP-Constants) ────────────────────────────────────────────
 // High confidence — MME-UE-S1AP-ID=0 and eNB-UE-S1AP-ID=8 are near-universal
 // reference points; NAS-PDU=26 likewise.
@@ -41,6 +55,15 @@ pub const ID_TAI: u32 = 67;
 pub const ID_EUTRAN_CGI: u32 = 100;
 pub const ID_RRC_ESTABLISHMENT_CAUSE: u32 = 134;
 
+// Verified against Wireshark's real S1AP-Constants.asn — see module doc.
+// InitialContextSetupRequest IEs:
+pub const ID_E_RAB_TO_BE_SETUP_LIST_CTXT_SU_REQ: u32 = 24;
+pub const ID_UE_AGGREGATE_MAXIMUM_BITRATE: u32 = 66;
+pub const ID_SECURITY_KEY: u32 = 73;
+// InitialContextSetupResponse IEs:
+pub const ID_E_RAB_SETUP_LIST_CTXT_SU_RES: u32 = 51;
+pub const ID_E_RAB_FAILED_TO_SETUP_LIST_CTXT_SU_RES: u32 = 48;
+
 // ── Field range constants ─────────────────────────────────────────────────────
 // Real spec types, ranges as commonly documented:
 //   ENB-UE-S1AP-ID  INTEGER (0..16777215)   — 24-bit
@@ -53,6 +76,25 @@ pub const MME_UE_S1AP_ID_MAX: u64 = 4_294_967_295;
 // we just give it a generously-sized constrained range (4 bits) rather than
 // pretending to enumerate exact cause values we haven't modeled in Rust yet.
 pub const RRC_ESTABLISHMENT_CAUSE_MAX: u64 = 15;
+
+// Verified against Wireshark's real S1AP-IEs.asn — see module doc.
+//   E-RAB-ID ::= INTEGER (0..15, ...)          — base range before the "..."
+//                                                 extension marker, which this
+//                                                 codebase doesn't model (same
+//                                                 simplification as everywhere
+//                                                 else here that touches an
+//                                                 extensible INTEGER type).
+//   QCI      ::= INTEGER (0..255)
+//   BitRate  ::= INTEGER (0..10000000000)      — 10 Gbps; NOT the same range
+//                                                 as NGAP's 5G BitRate
+//                                                 (0..4000000000000, 4 Tbps)
+//                                                 — different spec, genuinely
+//                                                 different max, don't reuse
+//                                                 ngap::ie_ids::BIT_RATE_MAX
+//                                                 here.
+pub const ERAB_ID_MAX: u64 = 15;
+pub const QCI_MAX: u64 = 255;
+pub const BIT_RATE_MAX: u64 = 10_000_000_000;
 
 // ProtocolIE-ID itself is INTEGER (0..65535) in the real spec.
 pub const PROTOCOL_IE_ID_MAX: u64 = 65_535;
