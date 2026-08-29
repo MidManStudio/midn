@@ -1,4 +1,12 @@
-# .github/workflows/midn-sim-netns-smoke-test.yml
+# .github/workflows/midn-sim-smoke-test.yml
+#
+# NOTE: this file's actual name in the repo (midn-sim-smoke-test.yml) no
+# longer matches what it does — its content is the netns+veth cross-
+# namespace test (originally delivered as a separate
+# midn-sim-netns-smoke-test.yml). The original loopback/combined-mode
+# smoke test that used to live under this filename isn't present in the
+# repo anymore either. Flagging this plainly rather than guessing which
+# one you actually want — see the accompanying message.
 #
 # `midn-sim-smoke-test.yml` proves the AMF and UE/gNB talk real bytes over a
 # real socket — but both sides are still two Tokio tasks in one process on
@@ -203,6 +211,13 @@ jobs:
               ("UE:  sent InitialContextSetupResponse",         ue_log,  "[UE ] -> InitialContextSetupResponse"),
               ("AMF: recorded real DL TEID (N3Event::UpdateBearer)", amf_log, "N3Event: UpdateBearer"),
               ("UE:  sent RegistrationComplete",                ue_log,  "[UE ] -> RegistrationComplete"),
+              # User-plane proof, added once midn-sim started actually
+              # driving midn-userplane's SessionManager/GtpForwarder from
+              # real N3Events instead of just proving the control plane.
+              ("UPF: GTP-U forwarder listening",                amf_log, "GTP-U forwarder listening"),
+              ("UE:  sent uplink G-PDU",                        ue_log,  "[UE ] -> G-PDU UL"),
+              ("UPF: received + routed uplink G-PDU",           amf_log, "[UPF] <- G-PDU UL"),
+              ("UE:  user-plane round trip confirmed (payload verified)", ue_log, "user-plane G-PDU round trip confirmed"),
               ("Overall: simulation reported success",          ue_log,  "Full Registration procedure completed"),
           ]
 
