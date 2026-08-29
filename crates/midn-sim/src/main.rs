@@ -6,17 +6,35 @@
 //! calls every existing test uses. Drives the full Registration procedure:
 //! RegistrationRequest -> IdentityRequest/Response -> AuthenticationRequest/
 //! Response (real 5G-AKA) -> SecurityModeCommand/Complete -> RegistrationAccept
-//! -> RegistrationComplete.
+//! -> RegistrationComplete -> a real GTP-U user-plane G-PDU round trip.
 //!
-//! Phase B (`AMF_UPF_N3_ADDR` below): RegistrationAccept + a bundled default
-//! PDU session arrive together via `InitialContextSetupRequest` instead of
+//! Phase B: RegistrationAccept + a bundled default PDU session arrive
+//! together via `InitialContextSetupRequest` instead of
 //! `DownlinkNasTransport`. The mock UE/gNB decrypts+verifies RegistrationAccept
 //! exactly as before, then additionally plays the gNB side of context setup:
-//! replies with `InitialContextSetupResponse` carrying a real (mock) DL TEID
-//! + gNB N3 address — the same exchange `amf::state_machine`'s own
+//! replies with `InitialContextSetupResponse` carrying a real DL TEID + its
+//! own real N3 address — the same exchange `amf::state_machine`'s own
 //! `full_registration_flow_phase_b_bundles_pdu_session_and_completes_ics`
-//! test already proves the AMF side handles correctly in-process, now over
-//! a real socket for the first time.
+//! test already proves the AMF side handles correctly in-process.
+//!
+//! User plane: the AMF process also plays the UPF role — `midn_userplane`'s
+//! `SessionManager`/`GtpForwarder` were already built and already had their
+//! own real-socket integration tests, just never driven by a real AMF's
+//! `N3Event`s before. Each event `Amf::process_ngap` emits gets applied to
+//! the SessionManager exactly the way that crate's own doc says an MME/AMF
+//! should (`CreateSession`/`UpdateBearer`/`RemoveSession` map 1:1 onto
+//! `create_session_with_teid`/`update_bearer_info`/`remove_session`). No
+//! simulated internet exists on the other side of the UPF, so uplink G-PDUs
+//! are simply echoed straight back downlink — proof the UL decap+route and
+//! DL route+encap paths both work, without needing a third simulated node.
+//!
+//! One real simplification, stated plainly: real 3GPP keeps AMF and UPF as
+//! separate network functions. This binary collapses them into the same
+//! process/address for the same reason the UE and gNB are already
+//! collapsed — it's a convenience of this simulation, not a protocol
+//! requirement, and neither pairing shares any Rust state either way.
+//! Everything either side knows about the other still comes from real bytes
+//! on a real socket.
 //!
 //! Run (single process, both roles — the original mode, still the default):
 //! `cargo run -p midn-sim`
@@ -26,17 +44,12 @@
 //! can't be placed in separate namespaces:
 //! `cargo run -p midn-sim -- --role amf --bind 10.99.0.1:38412`
 //! `cargo run -p midn-sim -- --role ue  --bind 10.99.0.2:0 --amf 10.99.0.1:38412`
-//!
-//! The AMF and UE sides sharing one process in the default mode is only
-//! ever a convenience (one `cargo run`, one log to read) — they do not
-//! share any Rust state either way. Everything either side knows about the
-//! other comes from bytes on the socket, loopback or not, one process or
-//! two.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use bytes::Bytes;
+use midn_proto::gtp::header::GtpuHeader;
 use midn_proto::nas5gs::{
     decode_nas5gs, decode_protected_downlink, encode_auth_response, encode_identity_response_suci,
     encode_registration_complete, encode_registration_request, encode_sec_mode_complete, Nas5gsPdu,
@@ -47,6 +60,7 @@ use midn_proto::ngap::{
     NgapMessage, NgapUplinkNasTransport, PduSessionSetupItem,
 };
 use midn_transport::{LinkEvent, SctpLink};
+use midn_userplane::{DlPacket, GtpForwarder, SessionManager, GTP_PORT};
 
 // ── Shared test-subscriber material ─────────────────────────────────────────
 // Same values `amf::state_machine`'s own test suite uses — not because this
@@ -61,14 +75,9 @@ const TEST_PLMN: [u8; 3] = [0x00, 0x11, 0x22];
 const TEST_TAI: [u8; 6] = [0x00, 0x11, 0x22, 0x00, 0x00, 0x01];
 const RAN_UE_NGAP_ID: u32 = 7;
 
-// ── Phase B material ─────────────────────────────────────────────────────────
-// Same values `amf::state_machine`'s Phase B test uses for the AMF-told UPF
-// address, plus fixed stand-ins for what a real gNB would allocate itself
-// on ICSResponse (this binary doesn't model a gNB user-plane stack at all —
-// same "no real allocator, fixed placeholder" simplification `ue_ip: [0;4]`
-// already makes in `amf::registration`, just on the UE/gNB side instead).
-const AMF_UPF_N3_ADDR: [u8; 4] = [10, 0, 0, 1];
-const GNB_N3_ADDR: [u8; 4] = [172, 16, 0, 5];
+/// DL TEID the mock gNB tells the AMF/UPF to use — a real gNB would
+/// allocate this itself; fixed here since nothing in this simulation reuses
+/// or collides with it (single subscriber, single PDU session per run).
 const MOCK_DL_TEID: u32 = 0xAABB_CCDD;
 
 /// 38412 is the real, standardized NGAP-over-SCTP port (TS 38.412) —
@@ -77,6 +86,17 @@ const MOCK_DL_TEID: u32 = 0xAABB_CCDD;
 /// IPs under `--role`) is what matters; any free, unprivileged port
 /// (>1024, no root needed) would work identically.
 const AMF_BIND_ADDR: &str = "127.0.0.1:38412";
+
+/// Extract the IPv4 octets from a `SocketAddr` — every address this binary
+/// ever binds or is told about is IPv4 (see `parse_args`'s `USAGE` string
+/// and `run_both`'s hardcoded addresses), so this is a real, checked
+/// assumption, not a silent narrowing.
+fn ipv4_octets(addr: SocketAddr) -> [u8; 4] {
+    match addr.ip() {
+        IpAddr::V4(v4) => v4.octets(),
+        IpAddr::V6(v6) => panic!("expected an IPv4 address, got IPv6: {v6}"),
+    }
+}
 
 #[derive(Debug)]
 enum Role {
@@ -241,7 +261,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             let result = run_ue(bind, amf).await;
             match &result {
                 Ok(()) => println!(
-                    "\n✅ Full Registration procedure completed over a real SCTP-over-UDP socket."
+                    "\n✅ Full Registration procedure completed and user-plane G-PDU round trip confirmed, over a real SCTP-over-UDP socket."
                 ),
                 Err(e) => println!("\n❌ Simulation failed: {e}"),
             }
@@ -256,8 +276,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 /// no changes.
 async fn run_both() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let amf_addr: SocketAddr = AMF_BIND_ADDR.parse().unwrap();
-    // Port 0 = OS picks a free ephemeral port for the UE side.
-    let ue_bind_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    // 127.0.0.2, not 127.0.0.1 — needs to be a genuinely different address
+    // from the AMF side now that both sides also bind a GTP-U socket on the
+    // fixed port 2152 (`GTP_PORT`): same IP for both would collide on that
+    // bind. The whole 127.0.0.0/8 block routes to loopback on Linux with no
+    // extra interface config needed, so this "just works" the same way
+    // 127.0.0.1 always has. Port 0 still means "OS picks a free ephemeral
+    // port" for the control-plane (SCTP-over-UDP) socket specifically.
+    let ue_bind_addr: SocketAddr = "127.0.0.2:0".parse().unwrap();
 
     println!("midn-sim — AMF + mock UE/gNB over a real SCTP-over-UDP socket\n");
 
@@ -273,7 +299,7 @@ async fn run_both() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     match &ue_result {
         Ok(()) => println!(
-            "\n✅ Full Registration procedure completed over a real SCTP-over-UDP socket."
+            "\n✅ Full Registration procedure completed and user-plane G-PDU round trip confirmed, over a real SCTP-over-UDP socket."
         ),
         Err(e) => println!("\n❌ Simulation failed: {e}"),
     }
@@ -307,8 +333,45 @@ async fn run_both() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 // ── AMF side ─────────────────────────────────────────────────────────────────
 
 async fn run_amf(bind_addr: SocketAddr) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut amf = midn_core::amf::Amf::new().with_phase_b(AMF_UPF_N3_ADDR);
+    // This process plays UPF too — see module doc for why that's an honest
+    // simplification, not silently glossed over. The UPF's N3 address is
+    // this same process's real address (same IP the control plane is
+    // bound to, GTP-U's own standard port instead of NGAP's) — NOT a fixed
+    // placeholder, since the bundled PDU session tells the UE to actually
+    // send uplink traffic there.
+    let upf_ip = ipv4_octets(bind_addr);
+    let mut amf = midn_core::amf::Amf::new().with_phase_b(upf_ip);
     amf.hss_mut().provision_hex(TEST_IMSI, TEST_K, TEST_OPC)?;
+
+    let mut session_mgr = SessionManager::new();
+    let routing = session_mgr.routing_arc();
+    let (ul_tx, mut ul_rx) = tokio::sync::mpsc::channel(64);
+    let gtp_bind_addr = SocketAddr::from((upf_ip, GTP_PORT));
+    let (fwd, dl_tx) = GtpForwarder::bind_addr(&gtp_bind_addr.to_string(), routing, ul_tx).await?;
+    println!("[UPF] GTP-U forwarder listening on {gtp_bind_addr}");
+    tokio::spawn(fwd.run());
+
+    // No simulated internet exists on the other side of this UPF — echo
+    // every uplink G-PDU straight back downlink. That alone exercises both
+    // directions for real: UL decap + routing.lookup_ul, then DL
+    // routing.lookup_dl + re-encap, over the exact same `GtpForwarder` that
+    // crate's own tests already proved works over a real socket — this is
+    // the first time anything actually drives it from a real AMF's events
+    // instead of a hand-built RoutingTable.
+    tokio::spawn(async move {
+        while let Some(pkt) = ul_rx.recv().await {
+            println!(
+                "[UPF] <- G-PDU UL ({} bytes) — routing to UE {:?}",
+                pkt.inner_ip.len(), pkt.route.ue_ip
+            );
+            let echo = DlPacket { inner_ip: pkt.inner_ip.clone(), ue_ip: pkt.route.ue_ip };
+            if dl_tx.send(echo).await.is_err() {
+                println!("[UPF] DL channel closed — stopping echo task");
+                break;
+            }
+            println!("[UPF] -> G-PDU DL ({} bytes, echoed back)", pkt.inner_ip.len());
+        }
+    });
 
     println!("[AMF] binding {bind_addr}, waiting for an association...");
     let mut link = SctpLink::accept(bind_addr).await?;
@@ -331,6 +394,7 @@ async fn run_amf(bind_addr: SocketAddr) -> Result<(), Box<dyn std::error::Error 
                 let (responses, events) = amf.process_ngap(msg).await;
                 for evt in &events {
                     println!("[AMF]    (N3Event: {evt:?})");
+                    apply_n3_event(&mut session_mgr, evt);
                 }
                 for resp in responses {
                     println!("[AMF] -> {}", ngap_summary(&resp));
@@ -347,9 +411,40 @@ async fn run_amf(bind_addr: SocketAddr) -> Result<(), Box<dyn std::error::Error 
     }
 }
 
+/// Apply one `N3Event` to the UPF's session state — the 1:1 mapping
+/// `midn_userplane::SessionManager`'s own module doc already documents for
+/// `UpfEvent` (same shape, `midn_core::amf::N3Event` is the 5G-side name for
+/// it). `qfi` stands in for `SessionManager`'s LTE-shaped `qci: u8`
+/// parameter — same spirit as reusing `TeidAllocator` across mme/amf, a
+/// generic "QoS class byte" the forwarder only uses for logging/metrics,
+/// not literally the same 3GPP field.
+fn apply_n3_event(session_mgr: &mut SessionManager, evt: &midn_core::amf::N3Event) {
+    use midn_core::amf::N3Event;
+    match *evt {
+        N3Event::CreateSession { ul_teid, entity_id, imsi, qfi, ue_ip, gnb_addr, .. } => {
+            session_mgr.create_session_with_teid(ul_teid, entity_id, imsi, ue_ip, gnb_addr, qfi);
+        }
+        N3Event::UpdateBearer { ul_teid, dl_teid, gnb_addr } => {
+            if !session_mgr.update_bearer_info(ul_teid, dl_teid, gnb_addr) {
+                eprintln!("[UPF] update_bearer_info: no session found for ul_teid={ul_teid:08x} (CreateSession missing or already removed)");
+            }
+        }
+        N3Event::RemoveSession { ul_teid } => {
+            session_mgr.remove_session(ul_teid);
+        }
+    }
+}
+
 // ── UE / gNB side ────────────────────────────────────────────────────────────
 
 async fn run_ue(bind_addr: SocketAddr, amf_addr: SocketAddr) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let my_ip = ipv4_octets(bind_addr);
+
+    // Bound early — ready to receive the DL G-PDU echo whenever the UPF
+    // gets around to sending it (well before this UE side actually sends
+    // anything uplink), not just right before it's needed.
+    let gtp_sock = tokio::net::UdpSocket::bind(SocketAddr::from((my_ip, GTP_PORT))).await?;
+
     println!("[UE ] connecting to AMF at {amf_addr}");
     let mut link = SctpLink::connect(bind_addr, amf_addr).await?;
 
@@ -502,17 +597,16 @@ async fn run_ue(bind_addr: SocketAddr, amf_addr: SocketAddr) -> Result<(), Box<d
                 );
 
                 // gNodeB confirms the security context + PDU session: real
-                // DL TEID + gNB N3 address. No real gNB user-plane stack
-                // exists in this binary — GNB_N3_ADDR/MOCK_DL_TEID are fixed
-                // stand-ins, same "no real allocator, fixed placeholder"
-                // simplification AMF_UPF_N3_ADDR's own doc note already
-                // flags on the AMF side.
+                // DL TEID + this process's own real N3 address — NOT a
+                // fixed placeholder, since the UPF needs to actually be
+                // able to reach this address for the G-PDU echo below to
+                // land anywhere.
                 let icrsp = NgapMessage::InitialContextSetupResponse(NgapInitialContextSetupResponse {
                     amf_ue_ngap_id,
                     ran_ue_ngap_id,
                     pdu_sessions_setup: vec![PduSessionSetupItem {
                         pdu_session_id,
-                        transport_layer_addr: GNB_N3_ADDR,
+                        transport_layer_addr: my_ip,
                         gtp_teid: MOCK_DL_TEID.to_be_bytes(),
                     }],
                     pdu_sessions_failed: vec![],
@@ -526,12 +620,63 @@ async fn run_ue(bind_addr: SocketAddr, amf_addr: SocketAddr) -> Result<(), Box<d
                 println!(
                     "[UE ] registration complete — subscriber is online, PDU session {pdu_session_id} up."
                 );
+
+                user_plane_round_trip(&gtp_sock, upf_addr, ul_teid).await?;
                 return Ok(());
             }
 
             other => return Err(format!("unexpected NGAP message from AMF: {other:?}").into()),
         }
     }
+}
+
+/// Send one real GTP-U G-PDU uplink and confirm it comes back down —
+/// `run_amf`'s echo task is the other half of this. Real GTP-U is plain
+/// UDP with no delivery guarantee, and there's a genuine race underneath
+/// that on top of it: the UPF only routes correctly once it's processed
+/// this UE's `InitialContextSetupResponse` (fire-and-forget, sent moments
+/// ago) and called `update_bearer_info` — same shutdown-race *class* of
+/// issue `run_both` already hit once (see its own doc comment), just
+/// earlier in the flow and about a dropped packet instead of a missing log
+/// line. A short retry loop absorbs it more honestly than guessing a fixed
+/// sleep would: if the UPF's route isn't installed yet, the datagram is
+/// simply dropped (logged `UnknownSession` on the UPF side) and the next
+/// attempt succeeds once it is.
+async fn user_plane_round_trip(
+    gtp_sock: &tokio::net::UdpSocket,
+    upf_addr: [u8; 4],
+    ul_teid: u32,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    const PAYLOAD: &[u8] = b"real user data over a real GTP-U tunnel";
+    let hdr = GtpuHeader::new_gpdu(ul_teid, PAYLOAD.len() as u16);
+    let mut gpdu = Vec::with_capacity(GtpuHeader::SIZE + PAYLOAD.len());
+    gpdu.extend_from_slice(&hdr.to_bytes());
+    gpdu.extend_from_slice(PAYLOAD);
+    let upf_gtp_addr = SocketAddr::from((upf_addr, GTP_PORT));
+
+    let mut buf = vec![0u8; 512];
+    for attempt in 1..=5 {
+        gtp_sock.send_to(&gpdu, upf_gtp_addr).await?;
+        println!(
+            "[UE ] -> G-PDU UL (ul_teid={ul_teid:08x}, {} bytes) -> UPF {upf_gtp_addr} (attempt {attempt}/5)",
+            PAYLOAD.len()
+        );
+
+        let recv = tokio::time::timeout(Duration::from_millis(500), gtp_sock.recv_from(&mut buf)).await;
+        let Ok(Ok((len, _))) = recv else { continue };
+        let Some((dl_hdr, dl_payload)) = GtpuHeader::parse(&buf[..len]) else { continue };
+
+        println!("[UE ] <- G-PDU DL (dl_teid={:08x}, {} bytes)", dl_hdr.teid, dl_payload.len());
+        if dl_payload != PAYLOAD {
+            return Err(format!(
+                "DL G-PDU payload mismatch: sent {PAYLOAD:?}, got back {dl_payload:?}"
+            ).into());
+        }
+        println!("[UE ] user-plane G-PDU round trip confirmed — payload matches what was sent.");
+        return Ok(());
+    }
+
+    Err("no DL G-PDU echo received after 5 attempts".into())
 }
 
 /// Encode a null-scheme SUCI carrying `imsi` — the exact inverse of
