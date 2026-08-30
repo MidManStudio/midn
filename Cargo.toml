@@ -8,6 +8,7 @@ members = [
     "crates/midn-userplane-ebpf",
     "crates/midn-transport",
     "crates/midn-sim",
+    "crates/mme-sim",
 ]
 resolver = "2"
 
