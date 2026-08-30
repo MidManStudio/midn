@@ -1,0 +1,228 @@
+# .github/workflows/mme-sim-smoke-test.yml
+#
+# LTE twin of midn-sim-smoke-test.yml — same netns+veth cross-namespace
+# proof, built netns-first from the start this time instead of arriving at
+# it incrementally, since that whole pattern (namespace/veth setup,
+# PID-file handoff across steps, the drain-delay-before-kill teardown
+# reasoning) is already proven working. Two independent OS processes
+# (`mme-sim --role mme` / `--role ue`), each in its own network namespace,
+# connected only by a veth pair with real (non-loopback) point-to-point
+# IPs. Uses `mme-sim`'s `--role mme` / `--role ue` split (see that file's
+# doc comment) — two Tokio tasks in one process can't be placed in two
+# network namespaces, only two real processes can.
+#
+# Different subnet (10.98.0.0/30) from midn-sim-smoke-test.yml's
+# 10.99.0.0/30 — not load-bearing (each workflow run gets its own fresh
+# runner VM, so there's no actual collision risk), just avoids any
+# confusion reading the two side by side.
+#
+# Three layers, cheapest first, each gating the next:
+#   1. netns + veth setup, verified with a plain ping.
+#   2. `mme-sim --role mme` really bound the veth IP (10.98.0.1:36412),
+#      not loopback.
+#   3. The Attach-procedure checkpoints (one fewer than midn-sim's
+#      Registration checkpoints — LTE's AttachRequest carries the IMSI
+#      directly, no separate Identity Request/Response round trip the way
+#      NAS-5GS needs one for its SUCI-based first registration), plus the
+#      same user-plane G-PDU round trip proof, split across two real
+#      per-process logs (mme.log / ue.log).
+#
+# Deliberately its own workflow, same reasoning midn-sim-smoke-test.yml
+# gives for not touching midn-test.yml's 680 lines blind, and for staying
+# separate from midn-sim-smoke-test.yml itself — this is a different
+# binary with a different process tree, no reason to share a job.
+
+name: mme-sim — netns Smoke Test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RUN_TIMEOUT_SECONDS: 30
+  MME_ADDR: 10.98.0.1
+  UE_ADDR: 10.98.0.2
+  MME_PORT: 36412
+
+jobs:
+  netns-smoke-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Get Rust version
+        id: rustver
+        run: echo "ver=$(rustc --version)" >> $GITHUB_OUTPUT
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: cargo-registry-mme-sim-${{ hashFiles('crates/midn-transport/Cargo.toml', 'crates/mme-sim/Cargo.toml') }}
+          restore-keys: |
+            cargo-registry-mme-sim-
+            cargo-registry-midn-
+            cargo-registry-
+
+      # Pulls in midn-transport/midn-core/midn-userplane automatically
+      # (path dependencies) — no separate build steps needed.
+      - name: Build mme-sim
+        run: cargo build -p mme-sim --release
+
+      - name: Set up netns + veth pair
+        run: |
+          set -e
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq iproute2 iputils-ping
+
+          sudo ip netns add ns-mme
+          sudo ip netns add ns-ue
+
+          sudo ip link add veth-mme type veth peer name veth-ue
+          sudo ip link set veth-mme netns ns-mme
+          sudo ip link set veth-ue netns ns-ue
+
+          sudo ip netns exec ns-mme ip addr add ${MME_ADDR}/30 dev veth-mme
+          sudo ip netns exec ns-ue  ip addr add ${UE_ADDR}/30  dev veth-ue
+
+          sudo ip netns exec ns-mme ip link set veth-mme up
+          sudo ip netns exec ns-ue  ip link set veth-ue up
+          sudo ip netns exec ns-mme ip link set lo up
+          sudo ip netns exec ns-ue  ip link set lo up
+
+          echo "--- ns-mme ---"
+          sudo ip netns exec ns-mme ip -4 addr show veth-mme
+          echo "--- ns-ue ---"
+          sudo ip netns exec ns-ue  ip -4 addr show veth-ue
+
+      - name: Verify veth connectivity (ping ns-ue -> ns-mme)
+        run: |
+          sudo ip netns exec ns-ue ping -c 2 -W 2 "${MME_ADDR}" \
+            > veth-ping.log 2>&1 || true
+          cat veth-ping.log
+
+      - name: Run mme-sim across the namespace boundary
+        run: |
+          sudo ip netns exec ns-mme \
+            ./target/release/mme-sim --role mme --bind "${MME_ADDR}:${MME_PORT}" \
+            > mme.log 2>&1 &
+          echo $! > mme.pid
+          disown
+
+          sleep 1
+
+          timeout "${RUN_TIMEOUT_SECONDS}"s \
+            sudo ip netns exec ns-ue \
+            ./target/release/mme-sim --role ue --bind "${UE_ADDR}:0" --mme "${MME_ADDR}:${MME_PORT}" \
+            > ue.log 2>&1 || true
+
+          # Same drain-delay reasoning midn-sim-smoke-test.yml documents:
+          # the UE process exiting only proves its last sends completed
+          # locally, not that the MME process has processed them yet.
+          sleep 1
+
+      - name: Tear down netns + veth pair
+        if: always()
+        run: |
+          if [ -f mme.pid ]; then
+            sudo kill "$(cat mme.pid)" 2>/dev/null || true
+          fi
+          sudo pkill -f "mme-sim --role mme" 2>/dev/null || true
+
+          sudo ip netns delete ns-mme 2>/dev/null || true
+          sudo ip netns delete ns-ue 2>/dev/null || true
+
+      - name: Check the exchange actually happened, write job summary
+        if: always()
+        run: |
+          python3 - << 'PYEOF'
+          import os
+
+          def read_or(path):
+              try:
+                  with open(path) as f:
+                      return f.read()
+              except FileNotFoundError:
+                  return None
+
+          ping_log = read_or('veth-ping.log')
+          mme_log = read_or('mme.log')
+          ue_log = read_or('ue.log')
+
+          # (label, log, required substring) — every one of these has to
+          # actually appear for the run to count as a real, complete Attach
+          # procedure across a genuine namespace boundary, not just "the
+          # processes started".
+          checks = [
+              ("netns+veth: ns-ue reached ns-mme over the veth pair (ping)", ping_log, "0% packet loss"),
+              ("MME: bound the real veth IP, not loopback",     mme_log, f"binding {os.environ['MME_ADDR']}:{os.environ['MME_PORT']}"),
+              ("MME: SCTP association established",             mme_log, "[MME] SCTP association established"),
+              ("UE:  SCTP association established",             ue_log,  "[UE ] SCTP association established"),
+              ("UE:  sent AttachRequest",                       ue_log,  "[UE ] -> AttachRequest"),
+              ("MME: routed it, replied with AuthenticationRequest", mme_log, "[MME] -> DownlinkNasTransport"),
+              ("UE:  sent AuthenticationResponse (RES)",        ue_log,  "[UE ] -> AuthenticationResponse(RES)"),
+              ("UE:  sent SecurityModeComplete",                ue_log,  "[UE ] -> SecurityModeComplete"),
+              ("MME: sent InitialContextSetupRequest (Phase 3)", mme_log, "[MME] -> InitialContextSetupRequest"),
+              ("MME: bundled EPS bearer (UpfEvent::CreateSession)", mme_log, "UpfEvent: CreateSession"),
+              ("UE:  decrypted AttachAccept",                   ue_log,  "[UE ] <- AttachAccept"),
+              ("UE:  sent InitialContextSetupResponse",         ue_log,  "[UE ] -> InitialContextSetupResponse"),
+              ("MME: recorded real DL TEID (UpfEvent::UpdateBearer)", mme_log, "UpfEvent: UpdateBearer"),
+              ("UE:  sent AttachComplete",                      ue_log,  "[UE ] -> AttachComplete"),
+              ("UPF: GTP-U forwarder listening",                mme_log, "GTP-U forwarder listening"),
+              ("UE:  sent uplink G-PDU",                        ue_log,  "[UE ] -> G-PDU UL"),
+              ("UPF: received + routed uplink G-PDU",           mme_log, "[UPF] <- G-PDU UL"),
+              ("UE:  user-plane round trip confirmed (payload verified)", ue_log, "user-plane G-PDU round trip confirmed"),
+              ("Overall: simulation reported success",          ue_log,  "Full Attach procedure completed"),
+          ]
+
+          results = [(label, log is not None and needle in log) for label, log, needle in checks]
+          all_ok = all(ok for _, ok in results)
+
+          lines = []
+          lines.append("## mme-sim netns Smoke Test")
+          lines.append("")
+          lines.append(
+              "### ✅ Full Attach procedure confirmed across a real network-namespace boundary"
+              if all_ok else "### ❌ Exchange incomplete"
+          )
+          lines.append("")
+          lines.append("| Check | Result |")
+          lines.append("|---|---|")
+          for label, ok in results:
+              lines.append(f"| {label} | {'✅' if ok else '❌'} |")
+          lines.append("")
+          lines.append("<details><summary>veth-ping.log</summary>\n")
+          lines.append("```")
+          lines.append((ping_log or "(missing — step never produced a log file)").strip())
+          lines.append("```")
+          lines.append("</details>")
+          lines.append("")
+          lines.append("<details><summary>mme.log</summary>\n")
+          lines.append("```")
+          lines.append((mme_log or "(missing — step never produced a log file)").strip())
+          lines.append("```")
+          lines.append("</details>")
+          lines.append("")
+          lines.append("<details><summary>ue.log</summary>\n")
+          lines.append("```")
+          lines.append((ue_log or "(missing — step never produced a log file)").strip())
+          lines.append("```")
+          lines.append("</details>")
+
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+              f.write("\n".join(lines) + "\n")
+
+          if not all_ok:
+              raise SystemExit(1)
+          PYEOF
