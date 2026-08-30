@@ -7,13 +7,16 @@
 //! `ie_ids` + `codec` add a real ASN.1 ALIGNED PER wire encoder/decoder on
 //! top of those structs, built on the shared bit-packing engine at
 //! `crate::per` (moved there since NGAP uses the identical ALIGNED PER
-//! rules — see `crate::per` module docs). See `codec` module docs for
-//! current scope (InitialUEMessage/Uplink/DownlinkNASTransport only) and
-//! the spec-fidelity disclaimer in `ie_ids` before relying on this for
-//! actual eNodeB hardware. Not yet wired into `Mme::process_s1ap` — that
-//! still takes in-process structs; plugging `encode_s1ap_pdu`/
-//! `decode_s1ap_pdu` into a real SCTP transport boundary is a separate
-//! next step.
+//! rules — see `crate::per` module docs). Scope now covers
+//! InitialUEMessage/Uplink/DownlinkNASTransport plus
+//! InitialContextSetupRequest/Response (added for `mme-sim`, the LTE
+//! counterpart of `midn-sim`'s already-proven real-socket setup) — see
+//! `codec` module docs for the exact current scope and the spec-fidelity
+//! disclaimer in `ie_ids` before relying on this for actual eNodeB
+//! hardware. Not yet wired into `Mme::process_s1ap` — that still takes
+//! in-process structs; `mme-sim` bridges real bytes to those structs at the
+//! transport boundary itself, the same pattern `midn-sim` already
+//! established for `Amf::process_ngap`/`ngap::codec`.
 
 pub mod codec;
 pub mod ie_ids;

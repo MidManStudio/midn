@@ -528,6 +528,52 @@ pub fn decode_protected(
     ctx.unprotect_uplink(bearer, seq_byte, mac_i, ciphertext)
 }
 
+/// Wrap an already-built plain NAS message in a protected envelope for the
+/// UPLINK direction (UE → MME) — uses `NasSecurityContext::protect_uplink`.
+/// UE-role mirror of [`encode_protected`]: a genuine UE-role caller (e.g.
+/// `mme-sim`'s mock UE, encoding AttachComplete) needs its own
+/// uplink-tagged protect, not a relabeled network-role one — same DIRECTION
+/// mismatch this codebase already hit and fixed once on the 5G side (see
+/// `nas5gs::codec::encode_protected_uplink`'s doc for the fuller
+/// rationale). This is the same gap on the LTE side, closed the same way.
+pub fn encode_protected_uplink(
+    ctx:         &mut NasSecurityContext,
+    sht:         u8,
+    bearer:      u8,
+    inner_plain: &[u8],
+) -> Bytes {
+    let protected = ctx.protect_uplink(bearer, inner_plain);
+    let mut buf = Vec::with_capacity(6 + protected.payload.len());
+    buf.push((sht << 4) | NAS_EPS_MM_PD);
+    buf.extend_from_slice(&protected.mac_i);
+    buf.push((protected.count & 0xFF) as u8);
+    buf.extend_from_slice(&protected.payload);
+    Bytes::from(buf)
+}
+
+/// Unwrap a protected NAS envelope for the DOWNLINK direction (MME → UE) —
+/// uses `NasSecurityContext::unprotect_downlink`. UE-role mirror of
+/// [`decode_protected`] — see `nas5gs::codec::decode_protected_downlink`
+/// for the identical rationale one level up the stack.
+///
+/// Returns the inner plain NAS bytes on success — feed those to
+/// [`decode_nas`] to get the actual `NasPdu`. Returns `None` on integrity
+/// failure or a malformed/too-short buffer; never panics on attacker input.
+pub fn decode_protected_downlink(
+    ctx:    &mut NasSecurityContext,
+    buf:    &[u8],
+    bearer: u8,
+) -> Option<Vec<u8>> {
+    if buf.len() < 6 { return None; }
+    let sht = (buf[0] >> 4) & 0x0F;
+    if sht == 0 { return None; } // plain — caller should use decode_nas directly
+    let mut mac_i = [0u8; 4];
+    mac_i.copy_from_slice(&buf[1..5]);
+    let seq_byte   = buf[5];
+    let ciphertext = &buf[6..];
+    ctx.unprotect_downlink(bearer, seq_byte, mac_i, ciphertext)
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -758,5 +804,62 @@ mod tests {
         // sht = 0 in the high nibble — decode_protected should refuse to touch it.
         let buf = [NAS_EPS_MM_PD, 0, 0, 0, 0, 0, 0xAA];
         assert!(decode_protected(&mut ctx, &buf, NAS_BEARER).is_none());
+    }
+
+    // ── UE-role (encode_protected_uplink / decode_protected_downlink) ───────────
+    // Mirrors nas5gs::codec's own test suite for the identical UE-role pair —
+    // same rationale, one level down the stack (LTE instead of 5G).
+
+    #[test]
+    fn encode_protected_uplink_decode_protected_downlink_round_trip() {
+        let kasme = [0x22u8; 32];
+        let mut ue_ctx = NasSecurityContext::new(&kasme, NasEeaAlgorithm::Eea2, NasEiaAlgorithm::Eia2);
+        let mut mme_ctx = NasSecurityContext::new(&kasme, NasEeaAlgorithm::Eea2, NasEiaAlgorithm::Eia2);
+        let inner_plain = encode_attach_complete();
+
+        // UE encodes uplink (AttachComplete-style)...
+        let envelope = encode_protected_uplink(&mut ue_ctx, SHT_INTEGRITY_CIPHERED, NAS_BEARER, &inner_plain);
+        // ...MME must decode it with decode_protected (unprotect_uplink), not
+        // decode_protected_downlink — that's the network-role function this
+        // envelope is meant for.
+        let recovered = decode_protected(&mut mme_ctx, &envelope, NAS_BEARER)
+            .expect("MME should be able to decode a real UE-role uplink envelope");
+        assert_eq!(recovered, inner_plain.to_vec());
+    }
+
+    #[test]
+    fn decode_protected_downlink_wrong_direction_rejects_even_untampered_envelope() {
+        // Same failure mode as nas5gs's own
+        // decode_protected_wrong_direction_rejects_even_untampered_envelope,
+        // one level down the stack: decode_protected (unprotect_uplink)
+        // opening an encode_protected (protect_downlink) envelope always
+        // fails on DIRECTION alone, with no tampering involved — the exact
+        // gap `mme-sim`'s mock UE would have hit if it tried to decode
+        // AttachAccept with the network-role decode_protected.
+        let kasme = [0x33u8; 32];
+        let mut mme_ctx = NasSecurityContext::new(&kasme, NasEeaAlgorithm::Eea2, NasEiaAlgorithm::Eia2);
+        let mut ue_ctx = NasSecurityContext::new(&kasme, NasEeaAlgorithm::Eea2, NasEiaAlgorithm::Eia2);
+
+        let envelope = encode_protected(&mut mme_ctx, SHT_INTEGRITY_CIPHERED, NAS_BEARER, b"AttachAccept-shaped plaintext");
+        assert!(decode_protected(&mut ue_ctx, &envelope, NAS_BEARER).is_none(), "wrong-direction decode must fail");
+        // decode_protected_downlink (unprotect_downlink) on the SAME
+        // envelope must succeed — proof this is genuinely about direction,
+        // not a broken envelope.
+        let mut ue_ctx2 = NasSecurityContext::new(&kasme, NasEeaAlgorithm::Eea2, NasEiaAlgorithm::Eia2);
+        assert!(decode_protected_downlink(&mut ue_ctx2, &envelope, NAS_BEARER).is_some());
+    }
+
+    #[test]
+    fn protected_envelope_advances_counts_independently_per_direction_ue_role() {
+        let kasme = [0x77u8; 32];
+        let mut mme_ctx = NasSecurityContext::new(&kasme, NasEeaAlgorithm::Eea2, NasEiaAlgorithm::Eia2);
+        let mut ue_ctx = NasSecurityContext::new(&kasme, NasEeaAlgorithm::Eea2, NasEiaAlgorithm::Eia2);
+
+        let first = encode_protected(&mut mme_ctx, SHT_INTEGRITY_CIPHERED, NAS_BEARER, b"one");
+        let second = encode_protected(&mut mme_ctx, SHT_INTEGRITY_CIPHERED, NAS_BEARER, b"two");
+        assert_ne!(first, second, "COUNT must advance between messages");
+
+        assert!(decode_protected_downlink(&mut ue_ctx, &first, NAS_BEARER).is_some());
+        assert!(decode_protected_downlink(&mut ue_ctx, &second, NAS_BEARER).is_some());
     }
         }

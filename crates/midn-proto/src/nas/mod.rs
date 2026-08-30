@@ -19,6 +19,8 @@ pub use codec::{
     encode_detach_accept,
     encode_protected,
     decode_protected,
+    encode_protected_uplink,
+    decode_protected_downlink,
     DecodedAttachAccept,
     DecodedAttachRequest,
     DecodedAuthenticationRequest,

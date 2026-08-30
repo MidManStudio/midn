@@ -290,6 +290,44 @@ impl NasSecurityContext {
         Some(plain)
     }
 
+    /// Protect an outbound (UE → MME) message. Consumes and advances the
+    /// uplink COUNT. UE-role mirror of `protect_downlink` — the DIRECTION
+    /// bit that feeds `eea2_apply`/`eia2_compute_mac` is a property of which
+    /// way a given message travels, not of which side is doing the
+    /// encrypting, so a genuine UE-role caller (`mme-sim`'s mock UE) needs
+    /// its own uplink-tagged protect, not a relabeled `protect_downlink`.
+    /// Mirrors `nas5gs::security::Nas5gsSecurityContext::protect_uplink`
+    /// exactly, one level down the stack — this codebase closed the
+    /// identical gap on the 5G side already; this closes it on the LTE
+    /// side. See `codec::encode_protected_uplink`.
+    pub fn protect_uplink(&mut self, bearer: u8, plain: &[u8]) -> ProtectedNas {
+        let count = self.ul_count;
+        self.ul_count = self.ul_count.wrapping_add(1);
+        self.protect(count, bearer, Direction::Uplink, plain)
+    }
+
+    /// Verify and decrypt an inbound (MME → UE) message. UE-role mirror of
+    /// `unprotect_uplink` — reconstructs COUNT off `dl_count` and verifies
+    /// with `Direction::Downlink`, matching what the network side used in
+    /// `protect_downlink` for the same message. Using `unprotect_uplink`
+    /// here instead (same COUNT baseline, wrong DIRECTION) would compute a
+    /// different keystream/MAC than the sender did and always fail — see
+    /// `nas5gs::security::Nas5gsSecurityContext::unprotect_downlink`'s doc
+    /// for the fuller rationale, identical here one level down the stack.
+    /// See `codec::decode_protected_downlink`.
+    pub fn unprotect_downlink(
+        &mut self,
+        bearer:     u8,
+        seq_byte:   u8,
+        mac_i:      [u8; 4],
+        ciphertext: &[u8],
+    ) -> Option<Vec<u8>> {
+        let count = reconstruct_count(self.dl_count, seq_byte);
+        let plain = self.unprotect(count, bearer, Direction::Downlink, mac_i, ciphertext)?;
+        self.dl_count = count.wrapping_add(1);
+        Some(plain)
+    }
+
     fn protect(&self, count: u32, bearer: u8, dir: Direction, plain: &[u8]) -> ProtectedNas {
         let mut payload = plain.to_vec();
         if self.eea != NasEeaAlgorithm::Eea0 {
