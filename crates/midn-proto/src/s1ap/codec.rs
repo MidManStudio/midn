@@ -69,16 +69,48 @@ use crate::error::{ProtoError, Result};
 use crate::s1ap::ie_ids as ie;
 use crate::s1ap::messages::{
     DownlinkNasTransport, ErabSetupItem, ErabToSetup, InitialContextSetupRequest,
-    InitialContextSetupResponse, InitialUeMessage, S1apMessage, UplinkNasTransport,
+    InitialContextSetupResponse, InitialUeMessage, S1apCause, S1apMessage, UeContextReleaseComplete,
+    UplinkNasTransport,
 };
 use crate::per::{PerReader, PerWriter};
 
 const PDU_CHOICE_INITIATING_MESSAGE: u64 = 0;
 const PDU_CHOICE_SUCCESSFUL_OUTCOME: u64 = 1;
 // unsuccessfulOutcome = 2 — no message this codec emits uses it yet
-// (InitialContextSetupFailure isn't implemented, same as UeContextRelease*).
+// (InitialContextSetupFailure isn't implemented, same as UeContextRelease*
+// was until this session).
 
 type IeEntry = (u32, u8, Vec<u8>);
+
+/// Flat discriminant mapping for the wire — see `ie::CAUSE_MAX`'s doc for
+/// why this isn't a real CHOICE-of-ENUMERATED encoding. Deliberately the
+/// SAME discriminant numbering as `ngap::codec::ngap_cause_to_u64` even
+/// though `S1apCause` and `NgapCause` aren't wire-compatible types — purely
+/// for internal consistency between the two codecs, not a spec requirement.
+fn s1ap_cause_to_u64(c: S1apCause) -> u64 {
+    match c {
+        S1apCause::RadioNetworkUnspecified => 0,
+        S1apCause::TransportUnspecified => 1,
+        S1apCause::NasNormalRelease => 2,
+        S1apCause::NasDetach => 3,
+        S1apCause::NasAuthFailure => 4,
+        S1apCause::ProtocolUnspecified => 5,
+        S1apCause::MiscUnspecified => 6,
+    }
+}
+
+fn s1ap_cause_from_u64(v: u64) -> Option<S1apCause> {
+    match v {
+        0 => Some(S1apCause::RadioNetworkUnspecified),
+        1 => Some(S1apCause::TransportUnspecified),
+        2 => Some(S1apCause::NasNormalRelease),
+        3 => Some(S1apCause::NasDetach),
+        4 => Some(S1apCause::NasAuthFailure),
+        5 => Some(S1apCause::ProtocolUnspecified),
+        6 => Some(S1apCause::MiscUnspecified),
+        _ => None,
+    }
+}
 
 // ── IE-container framing ──────────────────────────────────────────────────────
 
@@ -612,6 +644,90 @@ fn decode_initial_context_setup_response(entries: &[IeEntry]) -> Result<S1apMess
     }))
 }
 
+// ── UeContextReleaseCommand / Complete ─────────────────────────────────────────
+// Class-1 (id-UEContextRelease, ProcedureCode=23), same PDU-choice threading
+// as InitialContextSetupRequest/Response above. Same single-UE-per-socket
+// simplification `ngap::codec`'s equivalent doc states — no UE-ID IE
+// modeled here since this simulation never has ambiguity about which UE a
+// release command is for.
+
+pub fn encode_ue_context_release_command(cause: S1apCause) -> Bytes {
+    let mut entries: Vec<IeEntry> = Vec::with_capacity(1);
+    {
+        let mut w = PerWriter::new();
+        w.write_constrained_int(s1ap_cause_to_u64(cause), 0, ie::CAUSE_MAX);
+        entries.push((ie::ID_CAUSE, ie::CRITICALITY_IGNORE, w.into_bytes()));
+    }
+
+    let mut value_w = PerWriter::new();
+    write_ie_container(&mut value_w, &entries);
+
+    encode_pdu_wrapper(
+        PDU_CHOICE_INITIATING_MESSAGE, ie::PROC_UE_CONTEXT_RELEASE, ie::CRITICALITY_IGNORE,
+        &value_w.into_bytes(),
+    )
+}
+
+fn decode_ue_context_release_command(entries: &[IeEntry]) -> Result<S1apMessage> {
+    let mut cause = None;
+    for (id, _crit, val) in entries {
+        if *id == ie::ID_CAUSE {
+            let mut r = PerReader::new(val);
+            cause = r.read_constrained_int(0, ie::CAUSE_MAX).and_then(s1ap_cause_from_u64);
+        }
+    }
+    Ok(S1apMessage::UeContextReleaseCommand {
+        cause: cause.ok_or(ProtoError::MalformedS1ap { reason: "missing or invalid Cause" })?,
+    })
+}
+
+pub fn encode_ue_context_release_complete(msg: &UeContextReleaseComplete) -> Bytes {
+    let mut entries: Vec<IeEntry> = Vec::with_capacity(2);
+    {
+        let mut w = PerWriter::new();
+        w.write_constrained_int(msg.mme_ue_s1ap_id as u64, 0, ie::MME_UE_S1AP_ID_MAX);
+        entries.push((ie::ID_MME_UE_S1AP_ID, ie::CRITICALITY_IGNORE, w.into_bytes()));
+    }
+    {
+        let mut w = PerWriter::new();
+        w.write_constrained_int(msg.enb_ue_s1ap_id as u64, 0, ie::ENB_UE_S1AP_ID_MAX);
+        entries.push((ie::ID_ENB_UE_S1AP_ID, ie::CRITICALITY_IGNORE, w.into_bytes()));
+    }
+
+    let mut value_w = PerWriter::new();
+    write_ie_container(&mut value_w, &entries);
+
+    encode_pdu_wrapper(
+        PDU_CHOICE_SUCCESSFUL_OUTCOME, ie::PROC_UE_CONTEXT_RELEASE, ie::CRITICALITY_IGNORE,
+        &value_w.into_bytes(),
+    )
+}
+
+fn decode_ue_context_release_complete(entries: &[IeEntry]) -> Result<S1apMessage> {
+    let mut mme_ue_s1ap_id = None;
+    let mut enb_ue_s1ap_id = None;
+
+    for (id, _crit, val) in entries {
+        let mut r = PerReader::new(val);
+        match *id {
+            x if x == ie::ID_MME_UE_S1AP_ID => {
+                mme_ue_s1ap_id = r.read_constrained_int(0, ie::MME_UE_S1AP_ID_MAX).map(|v| v as u32);
+            }
+            x if x == ie::ID_ENB_UE_S1AP_ID => {
+                enb_ue_s1ap_id = r.read_constrained_int(0, ie::ENB_UE_S1AP_ID_MAX).map(|v| v as u32);
+            }
+            _ => {}
+        }
+    }
+
+    Ok(S1apMessage::UeContextReleaseComplete(UeContextReleaseComplete {
+        mme_ue_s1ap_id: mme_ue_s1ap_id
+            .ok_or(ProtoError::MalformedS1ap { reason: "missing MME-UE-S1AP-ID" })?,
+        enb_ue_s1ap_id: enb_ue_s1ap_id
+            .ok_or(ProtoError::MalformedS1ap { reason: "missing eNB-UE-S1AP-ID" })?,
+    }))
+}
+
 // ── Top-level dispatch ────────────────────────────────────────────────────────
 
 /// Encode an `S1apMessage` to its ALIGNED PER wire bytes.
@@ -625,9 +741,11 @@ pub fn encode_s1ap_pdu(msg: &S1apMessage) -> Result<Bytes> {
         S1apMessage::DownlinkNasTransport(m) => Ok(encode_downlink_nas_transport(m)),
         S1apMessage::InitialContextSetupRequest(m) => Ok(encode_initial_context_setup_request(m)),
         S1apMessage::InitialContextSetupResponse(m) => Ok(encode_initial_context_setup_response(m)),
+        S1apMessage::UeContextReleaseCommand { cause } => Ok(encode_ue_context_release_command(*cause)),
+        S1apMessage::UeContextReleaseComplete(m) => Ok(encode_ue_context_release_complete(m)),
         _ => Err(ProtoError::MalformedS1ap {
             reason: "PER encoding not yet implemented for this S1AP message — \
-                     only InitialUEMessage/Uplink/DownlinkNASTransport/InitialContextSetupRequest/Response",
+                     only InitialUEMessage/Uplink/DownlinkNASTransport/InitialContextSetupRequest/Response/UeContextReleaseCommand/Complete",
         }),
     }
 }
@@ -651,8 +769,14 @@ pub fn decode_s1ap_pdu(buf: &[u8]) -> Result<S1apMessage> {
         x if x == ie::PROC_INITIAL_CONTEXT_SETUP && choice == PDU_CHOICE_SUCCESSFUL_OUTCOME => {
             decode_initial_context_setup_response(&entries)
         }
+        x if x == ie::PROC_UE_CONTEXT_RELEASE && choice == PDU_CHOICE_INITIATING_MESSAGE => {
+            decode_ue_context_release_command(&entries)
+        }
+        x if x == ie::PROC_UE_CONTEXT_RELEASE && choice == PDU_CHOICE_SUCCESSFUL_OUTCOME => {
+            decode_ue_context_release_complete(&entries)
+        }
         _ => Err(ProtoError::MalformedS1ap {
-            reason: "unsupported procedure code — only InitialUEMessage/Uplink/DownlinkNASTransport/InitialContextSetupRequest/Response",
+            reason: "unsupported procedure code (or PDU choice) — only InitialUEMessage/Uplink/DownlinkNASTransport/InitialContextSetupRequest/Response/UeContextReleaseCommand/Complete",
         }),
     }
 }
@@ -888,10 +1012,66 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_variant_returns_error_not_garbage() {
-        let result = encode_s1ap_pdu(&S1apMessage::UeContextReleaseCommand {
-            cause: crate::s1ap::messages::S1apCause::NasNormalRelease,
+    fn ue_context_release_command_round_trip() {
+        for cause in [
+            S1apCause::RadioNetworkUnspecified,
+            S1apCause::TransportUnspecified,
+            S1apCause::NasNormalRelease,
+            S1apCause::NasDetach,
+            S1apCause::NasAuthFailure,
+            S1apCause::ProtocolUnspecified,
+            S1apCause::MiscUnspecified,
+        ] {
+            let bytes = encode_s1ap_pdu(&S1apMessage::UeContextReleaseCommand { cause }).unwrap();
+            match decode_s1ap_pdu(&bytes).unwrap() {
+                S1apMessage::UeContextReleaseCommand { cause: d } => assert_eq!(d, cause),
+                other => panic!("wrong variant decoded: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn ue_context_release_complete_round_trip() {
+        let msg = UeContextReleaseComplete { mme_ue_s1ap_id: 0xCAFEBABE, enb_ue_s1ap_id: 7 };
+        let bytes = encode_s1ap_pdu(&S1apMessage::UeContextReleaseComplete(msg.clone())).unwrap();
+        match decode_s1ap_pdu(&bytes).unwrap() {
+            S1apMessage::UeContextReleaseComplete(d) => {
+                assert_eq!(d.mme_ue_s1ap_id, msg.mme_ue_s1ap_id);
+                assert_eq!(d.enb_ue_s1ap_id, msg.enb_ue_s1ap_id);
+            }
+            other => panic!("wrong variant decoded: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ue_context_release_command_and_complete_share_procedure_code_but_not_choice() {
+        let cmd = S1apMessage::UeContextReleaseCommand { cause: S1apCause::NasDetach };
+        let complete = S1apMessage::UeContextReleaseComplete(UeContextReleaseComplete {
+            mme_ue_s1ap_id: 1, enb_ue_s1ap_id: 1,
         });
+
+        let cmd_bytes = encode_s1ap_pdu(&cmd).unwrap();
+        let complete_bytes = encode_s1ap_pdu(&complete).unwrap();
+
+        let (cmd_choice, cmd_proc, ..) = decode_pdu_wrapper(&cmd_bytes).unwrap();
+        let (complete_choice, complete_proc, ..) = decode_pdu_wrapper(&complete_bytes).unwrap();
+
+        assert_eq!(cmd_proc, ie::PROC_UE_CONTEXT_RELEASE);
+        assert_eq!(complete_proc, ie::PROC_UE_CONTEXT_RELEASE);
+        assert_ne!(cmd_choice, complete_choice, "Command/Complete must differ in PDU choice, not procedure code");
+
+        assert!(matches!(decode_s1ap_pdu(&cmd_bytes).unwrap(), S1apMessage::UeContextReleaseCommand { .. }));
+        assert!(matches!(decode_s1ap_pdu(&complete_bytes).unwrap(), S1apMessage::UeContextReleaseComplete(_)));
+    }
+
+    #[test]
+    fn unsupported_variant_returns_error_not_garbage() {
+        // S1SetupRequest/Response remain genuinely out of scope — unlike
+        // UeContextReleaseCommand, which this test used to check here before
+        // gaining real codec support this session.
+        let result = encode_s1ap_pdu(&S1apMessage::S1SetupRequest(
+            crate::s1ap::messages::S1SetupRequest { global_enb_id: [0u8; 8], enb_name: None, supported_tas: vec![] },
+        ));
         assert!(result.is_err(), "out-of-scope variants must error, not silently mis-encode");
     }
 

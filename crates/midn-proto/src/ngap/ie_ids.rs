@@ -61,6 +61,11 @@ pub const PROC_UPLINK_NAS_TRANSPORT: u32 = 46;
 /// disambiguates Request from Response at decode time.
 pub const PROC_INITIAL_CONTEXT_SETUP: u32 = 14;
 
+/// Verified against Wireshark's real NGAP-Constants.asn, fetched fresh this
+/// session (not recollected) — same verification standard as the
+/// InitialContextSetup block above.
+pub const PROC_UE_CONTEXT_RELEASE: u32 = 41;
+
 // ── ProtocolIE-ID (NGAP-Constants) ────────────────────────────────────────────
 // VERIFIED against Wireshark's NGAP-Constants.asn this session — see module
 // doc "Confidence upgrade".
@@ -80,6 +85,9 @@ pub const ID_PDU_SESSION_RESOURCE_SETUP_LIST_CTXT_RES: u32 = 72;
 /// PDU sessions that failed to set up, carried inside
 /// InitialContextSetupResponse.
 pub const ID_PDU_SESSION_RESOURCE_FAILED_TO_SETUP_LIST_CTXT_RES: u32 = 55;
+/// Verified against Wireshark's real NGAP-Constants.asn, fetched fresh this
+/// session — carried inside UeContextReleaseCommand.
+pub const ID_CAUSE: u32 = 15;
 
 // ── Field range constants ─────────────────────────────────────────────────────
 // Real spec types, ranges as commonly documented:
@@ -115,3 +123,13 @@ pub const BIT_RATE_MAX: u64 = 4_000_000_000_000;
 pub const PROTOCOL_IE_ID_MAX: u64 = 65_535;
 // ProcedureCode is INTEGER (0..255) — same generic range as S1AP.
 pub const PROCEDURE_CODE_MAX: u64 = 255;
+
+// Cause: real NGAP models this as a CHOICE { radioNetwork, transport, nas,
+// protocol, misc }, each arm its own ENUMERATED — this codebase's
+// `NgapCause` flattens all of that into one 7-variant Rust enum (matching
+// `s1ap::S1apCause`'s identical simplification), so the wire encoding here
+// is a flat constrained int over the enum's discriminant, not a real
+// nested CHOICE-of-ENUMERATED. Documented simplification, same spirit as
+// the PDU-session list's own flat/simplified structure — a real decoder
+// expecting the actual CHOICE shape would not parse this correctly.
+pub const CAUSE_MAX: u64 = 6;

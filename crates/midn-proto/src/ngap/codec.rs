@@ -70,9 +70,9 @@ use bytes::Bytes;
 use crate::error::{ProtoError, Result};
 use crate::ngap::ie_ids as ie;
 use crate::ngap::messages::{
-    NgapDownlinkNasTransport, NgapInitialContextSetupRequest, NgapInitialContextSetupResponse,
-    NgapInitialUeMessage, NgapMessage, NgapUplinkNasTransport, PduSessionSetupItem,
-    PduSessionToSetup,
+    NgapCause, NgapDownlinkNasTransport, NgapInitialContextSetupRequest,
+    NgapInitialContextSetupResponse, NgapInitialUeMessage, NgapMessage, NgapUeContextReleaseComplete,
+    NgapUplinkNasTransport, PduSessionSetupItem, PduSessionToSetup,
 };
 use crate::per::{PerReader, PerWriter};
 
@@ -84,6 +84,33 @@ const PDU_CHOICE_INITIATING_MESSAGE: u64 = 0;
 const PDU_CHOICE_SUCCESSFUL_OUTCOME: u64 = 1;
 
 type IeEntry = (u32, u8, Vec<u8>);
+
+/// Flat discriminant mapping for the wire — see `ie::CAUSE_MAX`'s doc for
+/// why this isn't a real CHOICE-of-ENUMERATED encoding.
+fn ngap_cause_to_u64(c: NgapCause) -> u64 {
+    match c {
+        NgapCause::RadioNetworkUnspecified => 0,
+        NgapCause::TransportUnspecified => 1,
+        NgapCause::NasNormalRelease => 2,
+        NgapCause::NasDeregister => 3,
+        NgapCause::NasAuthFailure => 4,
+        NgapCause::ProtocolUnspecified => 5,
+        NgapCause::MiscUnspecified => 6,
+    }
+}
+
+fn ngap_cause_from_u64(v: u64) -> Option<NgapCause> {
+    match v {
+        0 => Some(NgapCause::RadioNetworkUnspecified),
+        1 => Some(NgapCause::TransportUnspecified),
+        2 => Some(NgapCause::NasNormalRelease),
+        3 => Some(NgapCause::NasDeregister),
+        4 => Some(NgapCause::NasAuthFailure),
+        5 => Some(NgapCause::ProtocolUnspecified),
+        6 => Some(NgapCause::MiscUnspecified),
+        _ => None,
+    }
+}
 
 // ── IE-container framing ──────────────────────────────────────────────────────
 // Identical shape to s1ap::codec's — see that file's version for the fuller
@@ -639,6 +666,97 @@ fn decode_initial_context_setup_response(entries: &[IeEntry]) -> Result<NgapMess
     }))
 }
 
+// ── UeContextReleaseCommand / Complete ─────────────────────────────────────────
+// Class-1 (id-UEContextRelease, ProcedureCode=41), same PDU-choice threading
+// as InitialContextSetupRequest/Response above. No new struct fields needed
+// — `NgapMessage::UeContextReleaseCommand { cause }` and
+// `NgapUeContextReleaseComplete { amf_ue_ngap_id, ran_ue_ngap_id }` already
+// carry everything this codec encodes. One real simplification worth
+// stating plainly: this simulation only ever has one UE per real socket
+// (see `midn-sim`), so UeContextReleaseCommand's lack of a UE-ID IE isn't a
+// correctness gap for that use case — real NGAP disambiguates which UE via
+// `UE-NGAP-IDs` (a CHOICE of UE-NGAP-ID-pair / AMF-UE-NGAP-ID) that isn't
+// modeled here. A multi-UE simulation would need that IE added; this one
+// doesn't yet need it enough to justify the extra CHOICE-decoding
+// complexity.
+
+pub fn encode_ue_context_release_command(cause: NgapCause) -> Bytes {
+    let mut entries: Vec<IeEntry> = Vec::with_capacity(1);
+    {
+        let mut w = PerWriter::new();
+        w.write_constrained_int(ngap_cause_to_u64(cause), 0, ie::CAUSE_MAX);
+        entries.push((ie::ID_CAUSE, ie::CRITICALITY_IGNORE, w.into_bytes()));
+    }
+
+    let mut value_w = PerWriter::new();
+    write_ie_container(&mut value_w, &entries);
+
+    encode_pdu_wrapper(
+        PDU_CHOICE_INITIATING_MESSAGE, ie::PROC_UE_CONTEXT_RELEASE, ie::CRITICALITY_IGNORE,
+        &value_w.into_bytes(),
+    )
+}
+
+fn decode_ue_context_release_command(entries: &[IeEntry]) -> Result<NgapMessage> {
+    let mut cause = None;
+    for (id, _crit, val) in entries {
+        if *id == ie::ID_CAUSE {
+            let mut r = PerReader::new(val);
+            cause = r.read_constrained_int(0, ie::CAUSE_MAX).and_then(ngap_cause_from_u64);
+        }
+    }
+    Ok(NgapMessage::UeContextReleaseCommand {
+        cause: cause.ok_or(ProtoError::MalformedNgap { reason: "missing or invalid Cause" })?,
+    })
+}
+
+pub fn encode_ue_context_release_complete(msg: &NgapUeContextReleaseComplete) -> Bytes {
+    let mut entries: Vec<IeEntry> = Vec::with_capacity(2);
+    {
+        let mut w = PerWriter::new();
+        w.write_constrained_int(msg.amf_ue_ngap_id as u64, 0, ie::AMF_UE_NGAP_ID_MAX);
+        entries.push((ie::ID_AMF_UE_NGAP_ID, ie::CRITICALITY_IGNORE, w.into_bytes()));
+    }
+    {
+        let mut w = PerWriter::new();
+        w.write_constrained_int(msg.ran_ue_ngap_id as u64, 0, ie::RAN_UE_NGAP_ID_MAX);
+        entries.push((ie::ID_RAN_UE_NGAP_ID, ie::CRITICALITY_IGNORE, w.into_bytes()));
+    }
+
+    let mut value_w = PerWriter::new();
+    write_ie_container(&mut value_w, &entries);
+
+    encode_pdu_wrapper(
+        PDU_CHOICE_SUCCESSFUL_OUTCOME, ie::PROC_UE_CONTEXT_RELEASE, ie::CRITICALITY_IGNORE,
+        &value_w.into_bytes(),
+    )
+}
+
+fn decode_ue_context_release_complete(entries: &[IeEntry]) -> Result<NgapMessage> {
+    let mut amf_ue_ngap_id = None;
+    let mut ran_ue_ngap_id = None;
+
+    for (id, _crit, val) in entries {
+        let mut r = PerReader::new(val);
+        match *id {
+            x if x == ie::ID_AMF_UE_NGAP_ID => {
+                amf_ue_ngap_id = r.read_constrained_int(0, ie::AMF_UE_NGAP_ID_MAX).map(|v| v as u32);
+            }
+            x if x == ie::ID_RAN_UE_NGAP_ID => {
+                ran_ue_ngap_id = r.read_constrained_int(0, ie::RAN_UE_NGAP_ID_MAX).map(|v| v as u32);
+            }
+            _ => {}
+        }
+    }
+
+    Ok(NgapMessage::UeContextReleaseComplete(NgapUeContextReleaseComplete {
+        amf_ue_ngap_id: amf_ue_ngap_id
+            .ok_or(ProtoError::MalformedNgap { reason: "missing AMF-UE-NGAP-ID" })?,
+        ran_ue_ngap_id: ran_ue_ngap_id
+            .ok_or(ProtoError::MalformedNgap { reason: "missing RAN-UE-NGAP-ID" })?,
+    }))
+}
+
 // ── Top-level dispatch ────────────────────────────────────────────────────────
 
 /// Encode an `NgapMessage` to its ALIGNED PER wire bytes.
@@ -652,10 +770,12 @@ pub fn encode_ngap_pdu(msg: &NgapMessage) -> Result<Bytes> {
         NgapMessage::DownlinkNasTransport(m) => Ok(encode_downlink_nas_transport(m)),
         NgapMessage::InitialContextSetupRequest(m) => Ok(encode_initial_context_setup_request(m)),
         NgapMessage::InitialContextSetupResponse(m) => Ok(encode_initial_context_setup_response(m)),
+        NgapMessage::UeContextReleaseCommand { cause } => Ok(encode_ue_context_release_command(*cause)),
+        NgapMessage::UeContextReleaseComplete(m) => Ok(encode_ue_context_release_complete(m)),
         _ => Err(ProtoError::MalformedNgap {
             reason: "PER encoding not yet implemented for this NGAP message — \
                      only InitialUEMessage/Uplink/DownlinkNASTransport/ \
-                     InitialContextSetupRequest/Response in this increment",
+                     InitialContextSetupRequest/Response/UeContextReleaseCommand/Complete",
         }),
     }
 }
@@ -679,9 +799,16 @@ pub fn decode_ngap_pdu(buf: &[u8]) -> Result<NgapMessage> {
         x if x == ie::PROC_INITIAL_CONTEXT_SETUP && choice == PDU_CHOICE_SUCCESSFUL_OUTCOME => {
             decode_initial_context_setup_response(&entries)
         }
+        x if x == ie::PROC_UE_CONTEXT_RELEASE && choice == PDU_CHOICE_INITIATING_MESSAGE => {
+            decode_ue_context_release_command(&entries)
+        }
+        x if x == ie::PROC_UE_CONTEXT_RELEASE && choice == PDU_CHOICE_SUCCESSFUL_OUTCOME => {
+            decode_ue_context_release_complete(&entries)
+        }
         _ => Err(ProtoError::MalformedNgap {
             reason: "unsupported procedure code (or PDU choice) — only InitialUEMessage/Uplink/ \
-                     DownlinkNASTransport/InitialContextSetupRequest/Response in this increment",
+                     DownlinkNASTransport/InitialContextSetupRequest/Response/ \
+                     UeContextReleaseCommand/Complete",
         }),
     }
 }
@@ -880,10 +1007,64 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_variant_returns_error_not_garbage() {
-        let result = encode_ngap_pdu(&NgapMessage::UeContextReleaseCommand {
-            cause: crate::ngap::messages::NgapCause::NasNormalRelease,
+    fn ue_context_release_command_round_trip() {
+        for cause in [
+            NgapCause::RadioNetworkUnspecified,
+            NgapCause::TransportUnspecified,
+            NgapCause::NasNormalRelease,
+            NgapCause::NasDeregister,
+            NgapCause::NasAuthFailure,
+            NgapCause::ProtocolUnspecified,
+            NgapCause::MiscUnspecified,
+        ] {
+            let bytes = encode_ngap_pdu(&NgapMessage::UeContextReleaseCommand { cause }).unwrap();
+            match decode_ngap_pdu(&bytes).unwrap() {
+                NgapMessage::UeContextReleaseCommand { cause: d } => assert_eq!(d, cause),
+                other => panic!("wrong variant decoded: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn ue_context_release_complete_round_trip() {
+        let msg = NgapUeContextReleaseComplete { amf_ue_ngap_id: 0xCAFEBABE, ran_ue_ngap_id: 7 };
+        let bytes = encode_ngap_pdu(&NgapMessage::UeContextReleaseComplete(msg.clone())).unwrap();
+        match decode_ngap_pdu(&bytes).unwrap() {
+            NgapMessage::UeContextReleaseComplete(d) => {
+                assert_eq!(d.amf_ue_ngap_id, msg.amf_ue_ngap_id);
+                assert_eq!(d.ran_ue_ngap_id, msg.ran_ue_ngap_id);
+            }
+            other => panic!("wrong variant decoded: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ue_context_release_command_and_complete_share_procedure_code_but_not_choice() {
+        let cmd = NgapMessage::UeContextReleaseCommand { cause: NgapCause::NasDeregister };
+        let complete = NgapMessage::UeContextReleaseComplete(NgapUeContextReleaseComplete {
+            amf_ue_ngap_id: 1, ran_ue_ngap_id: 1,
         });
+
+        let cmd_bytes = encode_ngap_pdu(&cmd).unwrap();
+        let complete_bytes = encode_ngap_pdu(&complete).unwrap();
+
+        let (cmd_choice, cmd_proc, ..) = decode_pdu_wrapper(&cmd_bytes).unwrap();
+        let (complete_choice, complete_proc, ..) = decode_pdu_wrapper(&complete_bytes).unwrap();
+
+        assert_eq!(cmd_proc, ie::PROC_UE_CONTEXT_RELEASE);
+        assert_eq!(complete_proc, ie::PROC_UE_CONTEXT_RELEASE);
+        assert_ne!(cmd_choice, complete_choice, "Command/Complete must differ in PDU choice, not procedure code");
+
+        assert!(matches!(decode_ngap_pdu(&cmd_bytes).unwrap(), NgapMessage::UeContextReleaseCommand { .. }));
+        assert!(matches!(decode_ngap_pdu(&complete_bytes).unwrap(), NgapMessage::UeContextReleaseComplete(_)));
+    }
+
+    #[test]
+    fn unsupported_variant_returns_error_not_garbage() {
+        // NgSetupRequest/Response remain genuinely out of scope — unlike
+        // UeContextReleaseCommand, which this test used to check here before
+        // gaining real codec support this session.
+        let result = encode_ngap_pdu(&NgapMessage::NgSetupRequest);
         assert!(result.is_err(), "out-of-scope variants must error, not silently mis-encode");
     }
 

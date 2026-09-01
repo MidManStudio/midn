@@ -41,6 +41,9 @@ pub const PROC_UPLINK_NAS_TRANSPORT: u32 = 13;
 
 // Verified against Wireshark's real S1AP-Constants.asn — see module doc.
 pub const PROC_INITIAL_CONTEXT_SETUP: u32 = 9;
+// Verified against Wireshark's real S1AP-Constants.asn, fetched fresh this
+// session (not recollected).
+pub const PROC_UE_CONTEXT_RELEASE: u32 = 23;
 
 // ── ProtocolIE-ID (S1AP-Constants) ────────────────────────────────────────────
 // High confidence — MME-UE-S1AP-ID=0 and eNB-UE-S1AP-ID=8 are near-universal
@@ -63,6 +66,11 @@ pub const ID_SECURITY_KEY: u32 = 73;
 // InitialContextSetupResponse IEs:
 pub const ID_E_RAB_SETUP_LIST_CTXT_SU_RES: u32 = 51;
 pub const ID_E_RAB_FAILED_TO_SETUP_LIST_CTXT_SU_RES: u32 = 48;
+// Carried inside UeContextReleaseCommand — verified against Wireshark's
+// real S1AP-Constants.asn, fetched fresh this session. Notably a LOW value
+// (2) here vs NGAP's id-Cause=15 — genuinely different numbering between
+// the two specs' ProtocolIE-ID tables, not a typo.
+pub const ID_CAUSE: u32 = 2;
 
 // ── Field range constants ─────────────────────────────────────────────────────
 // Real spec types, ranges as commonly documented:
@@ -100,3 +108,15 @@ pub const BIT_RATE_MAX: u64 = 10_000_000_000;
 pub const PROTOCOL_IE_ID_MAX: u64 = 65_535;
 // ProcedureCode is INTEGER (0..255).
 pub const PROCEDURE_CODE_MAX: u64 = 255;
+
+// Cause: real S1AP models this as a CHOICE { radioNetwork, transport, nas,
+// misc } (S1AP's Cause CHOICE has 4 arms, one fewer than NGAP's 5 —
+// S1AP has no separate `protocol` arm at the top level), each its own
+// ENUMERATED — this codebase's `S1apCause` flattens all of that into one
+// 7-variant Rust enum, matching `ngap::NgapCause`'s identical
+// simplification for symmetry between the two protocols' Rust types even
+// though the real CHOICE shapes aren't identical. Wire
+// encoding here is a flat constrained int over the enum discriminant, not
+// a real nested CHOICE-of-ENUMERATED — same documented simplification as
+// ngap::ie_ids::CAUSE_MAX.
+pub const CAUSE_MAX: u64 = 6;
