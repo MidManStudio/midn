@@ -51,13 +51,13 @@ use std::time::Duration;
 use bytes::Bytes;
 use midn_proto::gtp::header::GtpuHeader;
 use midn_proto::nas5gs::{
-    decode_nas5gs, decode_protected_downlink, encode_auth_response, encode_identity_response_suci,
-    encode_registration_complete, encode_registration_request, encode_sec_mode_complete, Nas5gsPdu,
-    Nas5gsSecurityContext, Suci, NAS5GS_SHT_PLAIN,
+    decode_nas5gs, decode_protected_downlink, encode_auth_response, encode_deregistration_request,
+    encode_identity_response_suci, encode_registration_complete, encode_registration_request,
+    encode_sec_mode_complete, Nas5gsPdu, Nas5gsSecurityContext, Suci, NAS5GS_SHT_PLAIN,
 };
 use midn_proto::ngap::{
     decode_ngap_pdu, encode_ngap_pdu, NgapInitialContextSetupResponse, NgapInitialUeMessage,
-    NgapMessage, NgapUplinkNasTransport, PduSessionSetupItem,
+    NgapMessage, NgapUeContextReleaseComplete, NgapUplinkNasTransport, PduSessionSetupItem,
 };
 use midn_transport::{LinkEvent, SctpLink};
 use midn_userplane::{DlPacket, GtpForwarder, SessionManager, GTP_PORT};
@@ -261,7 +261,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             let result = run_ue(bind, amf).await;
             match &result {
                 Ok(()) => println!(
-                    "\n✅ Full Registration procedure completed and user-plane G-PDU round trip confirmed, over a real SCTP-over-UDP socket."
+                    "\n✅ Full Registration procedure, user-plane G-PDU round trip, and Deregistration all confirmed, over a real SCTP-over-UDP socket."
                 ),
                 Err(e) => println!("\n❌ Simulation failed: {e}"),
             }
@@ -299,7 +299,7 @@ async fn run_both() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     match &ue_result {
         Ok(()) => println!(
-            "\n✅ Full Registration procedure completed and user-plane G-PDU round trip confirmed, over a real SCTP-over-UDP socket."
+            "\n✅ Full Registration procedure, user-plane G-PDU round trip, and Deregistration all confirmed, over a real SCTP-over-UDP socket."
         ),
         Err(e) => println!("\n❌ Simulation failed: {e}"),
     }
@@ -489,25 +489,26 @@ async fn run_ue(bind_addr: SocketAddr, amf_addr: SocketAddr) -> Result<(), Box<d
                 let sht = nas_pdu.get(1).map(|b| b & 0x0F).unwrap_or(0);
 
                 if sht != NAS5GS_SHT_PLAIN {
-                    // The only protected downlink message this arm ever sees is
-                    // Phase A's RegistrationAccept — Phase B's RegistrationAccept
-                    // arrives via InitialContextSetupRequest instead (below).
+                    // The only protected downlink message this arm actually
+                    // sees in this binary's real flow is DeregistrationAccept
+                    // — Phase B's RegistrationAccept always arrives via
+                    // InitialContextSetupRequest instead (below), never
+                    // here, since Amf::with_phase_b is always on.
                     let kamf = kamf.ok_or("received a protected PDU before KAMF was derived")?;
                     let mut nas_ctx = Nas5gsSecurityContext::new(&kamf, 2, 2);
                     let plain = decode_protected_downlink(&mut nas_ctx, &nas_pdu)
-                        .ok_or("failed to decrypt/verify RegistrationAccept")?;
+                        .ok_or("failed to decrypt/verify DeregistrationAccept")?;
 
                     match decode_nas5gs(&plain)? {
-                        Nas5gsPdu::RegistrationAccept(acc) => {
-                            println!("[UE ] <- RegistrationAccept (result={})", acc.registration_result);
-                            let complete = encode_registration_complete();
-                            send_uplink(&mut link, amf_ue_ngap_id, complete).await?;
-                            println!("[UE ] -> RegistrationComplete");
-                            println!("[UE ] registration complete — subscriber is online.");
-                            return Ok(());
+                        Nas5gsPdu::DeregistrationAccept => {
+                            println!("[UE ] <- DeregistrationAccept");
+                            // UeContextReleaseCommand follows as its own
+                            // separate NGAP message — handled by that
+                            // match arm below, once this loop continues.
                         }
-                        other => return Err(format!("expected RegistrationAccept, got {other:?}").into()),
+                        other => return Err(format!("expected DeregistrationAccept, got {other:?}").into()),
                     }
+                    continue;
                 }
 
                 match decode_nas5gs(&nas_pdu)? {
@@ -622,6 +623,33 @@ async fn run_ue(bind_addr: SocketAddr, amf_addr: SocketAddr) -> Result<(), Box<d
                 );
 
                 user_plane_round_trip(&gtp_sock, upf_addr, ul_teid).await?;
+
+                // UeContextReleaseCommand/Complete gained real wire codec
+                // support this session — drive a full Deregistration to
+                // completion too, over the real socket, not just the
+                // in-process proof amf::deregistration's own tests already
+                // gave. DeregistrationAccept (protected) arrives via a
+                // separate DownlinkNasTransport, handled above; the loop
+                // continues rather than returning here.
+                let dereg = encode_deregistration_request(false);
+                send_uplink(&mut link, amf_ue_ngap_id, dereg).await?;
+                println!("[UE ] -> DeregistrationRequest");
+            }
+
+            NgapMessage::UeContextReleaseCommand { cause } => {
+                println!("[UE ] <- UeContextReleaseCommand (cause={cause:?})");
+                // No UE-ID IE on this message in this codebase's simplified
+                // encoding (see ngap::codec's own doc) — this simulation
+                // only ever has one UE per socket, so the AMF-UE-NGAP-ID
+                // learned earlier in this same run is unambiguous.
+                let amf_ue_ngap_id = amf_ue_ngap_id
+                    .ok_or("received UeContextReleaseCommand before AMF-UE-NGAP-ID was known")?;
+                let complete = NgapMessage::UeContextReleaseComplete(NgapUeContextReleaseComplete {
+                    amf_ue_ngap_id, ran_ue_ngap_id: RAN_UE_NGAP_ID,
+                });
+                link.send(encode_ngap_pdu(&complete)?).await?;
+                println!("[UE ] -> UeContextReleaseComplete");
+                println!("[UE ] deregistration complete — subscriber is offline.");
                 return Ok(());
             }
 
@@ -725,6 +753,8 @@ fn ngap_summary(msg: &NgapMessage) -> &'static str {
         NgapMessage::DownlinkNasTransport(_) => "DownlinkNasTransport",
         NgapMessage::InitialContextSetupRequest(_) => "InitialContextSetupRequest",
         NgapMessage::InitialContextSetupResponse(_) => "InitialContextSetupResponse",
+        NgapMessage::UeContextReleaseCommand { .. } => "UeContextReleaseCommand",
+        NgapMessage::UeContextReleaseComplete(_) => "UeContextReleaseComplete",
         _ => "(other NGAP message)",
     }
-            }
+        }
