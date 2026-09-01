@@ -65,12 +65,12 @@ use bytes::Bytes;
 use midn_proto::gtp::header::GtpuHeader;
 use midn_proto::nas::{
     decode_nas, decode_protected_downlink, encode_attach_complete, encode_attach_request,
-    encode_auth_response, encode_sec_mode_complete, NasEeaAlgorithm, NasEiaAlgorithm, NasPdu,
-    NasSecurityContext, NAS_BEARER,
+    encode_auth_response, encode_detach_request, encode_sec_mode_complete, NasEeaAlgorithm,
+    NasEiaAlgorithm, NasPdu, NasSecurityContext, NAS_BEARER, SHT_PLAIN,
 };
 use midn_proto::s1ap::{
     decode_s1ap_pdu, encode_s1ap_pdu, ErabSetupItem, InitialContextSetupResponse, InitialUeMessage,
-    S1apMessage, UplinkNasTransport,
+    S1apMessage, UeContextReleaseComplete, UplinkNasTransport,
 };
 use midn_transport::{LinkEvent, SctpLink};
 use midn_userplane::{DlPacket, GtpForwarder, SessionManager, GTP_PORT};
@@ -272,7 +272,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             let result = run_ue(bind, mme).await;
             match &result {
                 Ok(()) => println!(
-                    "\n✅ Full Attach procedure completed and user-plane G-PDU round trip confirmed, over a real SCTP-over-UDP socket."
+                    "\n✅ Full Attach procedure, user-plane G-PDU round trip, and Detach all confirmed, over a real SCTP-over-UDP socket."
                 ),
                 Err(e) => println!("\n❌ Simulation failed: {e}"),
             }
@@ -300,7 +300,7 @@ async fn run_both() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     match &ue_result {
         Ok(()) => println!(
-            "\n✅ Full Attach procedure completed and user-plane G-PDU round trip confirmed, over a real SCTP-over-UDP socket."
+            "\n✅ Full Attach procedure, user-plane G-PDU round trip, and Detach all confirmed, over a real SCTP-over-UDP socket."
         ),
         Err(e) => println!("\n❌ Simulation failed: {e}"),
     }
@@ -459,6 +459,35 @@ async fn run_ue(bind_addr: SocketAddr, mme_addr: SocketAddr) -> Result<(), Box<d
                 let mme_ue_s1ap_id = *mme_ue_s1ap_id.get_or_insert(dl.mme_ue_s1ap_id);
                 let nas_pdu = dl.nas_pdu;
 
+                // LTE's NAS header combines PD and SHT in ONE byte (high
+                // nibble = SHT), unlike NAS-5GS which splits them across
+                // two bytes — see decode_protected_downlink's own check for
+                // the same byte/nibble position this mirrors.
+                let sht = nas_pdu.first().map(|b| (*b >> 4) & 0x0F).unwrap_or(0);
+
+                if sht != SHT_PLAIN {
+                    // The only protected downlink message this arm actually
+                    // sees in this binary's real flow is DetachAccept —
+                    // Phase 3's AttachAccept always arrives via
+                    // InitialContextSetupRequest instead (below), never
+                    // here, since Mme::with_phase3 is always on.
+                    let kasme = kasme.ok_or("received a protected PDU before Kasme was derived")?;
+                    let mut nas_ctx = NasSecurityContext::new(&kasme, SELECTED_EEA, SELECTED_EIA);
+                    let plain = decode_protected_downlink(&mut nas_ctx, &nas_pdu, NAS_BEARER)
+                        .ok_or("failed to decrypt/verify DetachAccept")?;
+
+                    match decode_nas(&plain)? {
+                        NasPdu::DetachAccept => {
+                            println!("[UE ] <- DetachAccept");
+                            // UeContextReleaseCommand follows as its own
+                            // separate S1AP message — handled by that match
+                            // arm below, once this loop continues.
+                        }
+                        other => return Err(format!("expected DetachAccept, got {other:?}").into()),
+                    }
+                    continue;
+                }
+
                 match decode_nas(&nas_pdu)? {
                     NasPdu::AuthenticationRequest(req) => {
                         println!("[UE ] <- AuthenticationRequest");
@@ -552,6 +581,38 @@ async fn run_ue(bind_addr: SocketAddr, mme_addr: SocketAddr) -> Result<(), Box<d
                 println!("[UE ] attach complete — subscriber is online, E-RAB {erab_id} up.");
 
                 user_plane_round_trip(&gtp_sock, upf_addr, ul_teid).await?;
+
+                // UeContextReleaseCommand/Complete gained real wire codec
+                // support this session — drive a full Detach to completion
+                // too, over the real socket. DetachAccept (protected)
+                // arrives via a separate DownlinkNasTransport, handled
+                // above; the loop continues rather than returning here.
+                // detach_type=1 ("normal detach", TS 24.301 Table
+                // 9.9.3.7.1), switch_off=false. No real GUTI was ever
+                // assigned (mme::attach never populates AttachAccept's
+                // optional guti field in this codebase), so this is a
+                // fixed placeholder — matches the "no real allocator, fixed
+                // placeholder" simplification already used elsewhere in
+                // both sim binaries.
+                let detach = encode_detach_request(1, false, 0, &[0u8; 10]);
+                send_uplink(&mut link, mme_ue_s1ap_id, detach).await?;
+                println!("[UE ] -> DetachRequest");
+            }
+
+            S1apMessage::UeContextReleaseCommand { cause } => {
+                println!("[UE ] <- UeContextReleaseCommand (cause={cause:?})");
+                // No UE-ID IE on this message in this codebase's simplified
+                // encoding (see s1ap::codec's own doc) — this simulation
+                // only ever has one UE per socket, so the MME-UE-S1AP-ID
+                // learned earlier in this same run is unambiguous.
+                let mme_ue_s1ap_id = mme_ue_s1ap_id
+                    .ok_or("received UeContextReleaseCommand before MME-UE-S1AP-ID was known")?;
+                let complete = S1apMessage::UeContextReleaseComplete(UeContextReleaseComplete {
+                    mme_ue_s1ap_id, enb_ue_s1ap_id: ENB_UE_S1AP_ID,
+                });
+                link.send(encode_s1ap_pdu(&complete)?).await?;
+                println!("[UE ] -> UeContextReleaseComplete");
+                println!("[UE ] detach complete — subscriber is offline.");
                 return Ok(());
             }
 
@@ -640,6 +701,8 @@ fn s1ap_summary(msg: &S1apMessage) -> &'static str {
         S1apMessage::DownlinkNasTransport(_) => "DownlinkNasTransport",
         S1apMessage::InitialContextSetupRequest(_) => "InitialContextSetupRequest",
         S1apMessage::InitialContextSetupResponse(_) => "InitialContextSetupResponse",
+        S1apMessage::UeContextReleaseCommand { .. } => "UeContextReleaseCommand",
+        S1apMessage::UeContextReleaseComplete(_) => "UeContextReleaseComplete",
         _ => "(other S1AP message)",
     }
 }
