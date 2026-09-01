@@ -218,7 +218,16 @@ jobs:
               ("UE:  sent uplink G-PDU",                        ue_log,  "[UE ] -> G-PDU UL"),
               ("UPF: received + routed uplink G-PDU",           amf_log, "[UPF] <- G-PDU UL"),
               ("UE:  user-plane round trip confirmed (payload verified)", ue_log, "user-plane G-PDU round trip confirmed"),
-              ("Overall: simulation reported success",          ue_log,  "Full Registration procedure completed"),
+              # Deregistration, added once UeContextReleaseCommand/Complete
+              # gained real wire codec support — drives the full lifecycle
+              # (Registration -> user-plane -> Deregistration) over the real
+              # socket for the first time, not just amf::deregistration's
+              # own in-process tests.
+              ("UE:  sent DeregistrationRequest",               ue_log,  "[UE ] -> DeregistrationRequest"),
+              ("UE:  decrypted DeregistrationAccept",           ue_log,  "[UE ] <- DeregistrationAccept"),
+              ("AMF: sent UeContextReleaseCommand",             amf_log, "[AMF] -> UeContextReleaseCommand"),
+              ("UE:  sent UeContextReleaseComplete",            ue_log,  "[UE ] -> UeContextReleaseComplete"),
+              ("Overall: simulation reported success",          ue_log,  "Deregistration all confirmed"),
           ]
 
           results = [(label, log is not None and needle in log) for label, log, needle in checks]
