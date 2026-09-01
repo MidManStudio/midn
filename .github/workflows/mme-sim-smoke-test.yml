@@ -183,7 +183,15 @@ jobs:
               ("UE:  sent uplink G-PDU",                        ue_log,  "[UE ] -> G-PDU UL"),
               ("UPF: received + routed uplink G-PDU",           mme_log, "[UPF] <- G-PDU UL"),
               ("UE:  user-plane round trip confirmed (payload verified)", ue_log, "user-plane G-PDU round trip confirmed"),
-              ("Overall: simulation reported success",          ue_log,  "Full Attach procedure completed"),
+              # Detach, added once UeContextReleaseCommand/Complete gained
+              # real wire codec support — drives the full lifecycle (Attach
+              # -> user-plane -> Detach) over the real socket for the first
+              # time, mirroring midn-sim's own equivalent extension.
+              ("UE:  sent DetachRequest",                       ue_log,  "[UE ] -> DetachRequest"),
+              ("UE:  decrypted DetachAccept",                   ue_log,  "[UE ] <- DetachAccept"),
+              ("MME: sent UeContextReleaseCommand",             mme_log, "[MME] -> UeContextReleaseCommand"),
+              ("UE:  sent UeContextReleaseComplete",            ue_log,  "[UE ] -> UeContextReleaseComplete"),
+              ("Overall: simulation reported success",          ue_log,  "Detach all confirmed"),
           ]
 
           results = [(label, log is not None and needle in log) for label, log, needle in checks]
