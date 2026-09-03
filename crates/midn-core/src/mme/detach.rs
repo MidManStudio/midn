@@ -71,7 +71,9 @@ pub fn handle_detach_request(
         }));
     }
 
-    out.push(S1apMessage::UeContextReleaseCommand { cause: S1apCause::NasDetach });
+    out.push(S1apMessage::UeContextReleaseCommand {
+        mme_ue_s1ap_id, enb_ue_s1ap_id, cause: S1apCause::NasDetach,
+    });
 
     tracing::info!(
         mme_ue_s1ap_id, switch_off,
@@ -110,7 +112,8 @@ mod tests {
         assert!(matches!(out[0], S1apMessage::DownlinkNasTransport(_)));
         assert!(matches!(
             out[1],
-            S1apMessage::UeContextReleaseCommand { cause: S1apCause::NasDetach }
+            S1apMessage::UeContextReleaseCommand { mme_ue_s1ap_id, enb_ue_s1ap_id: 1, cause: S1apCause::NasDetach }
+            if mme_ue_s1ap_id == entity
         ));
     }
 
@@ -123,7 +126,8 @@ mod tests {
         assert_eq!(out.len(), 1, "switch-off skips DetachAccept");
         assert!(matches!(
             out[0],
-            S1apMessage::UeContextReleaseCommand { cause: S1apCause::NasDetach }
+            S1apMessage::UeContextReleaseCommand { mme_ue_s1ap_id, enb_ue_s1ap_id: 1, cause: S1apCause::NasDetach }
+            if mme_ue_s1ap_id == entity
         ));
     }
 

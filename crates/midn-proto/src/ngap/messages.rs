@@ -31,11 +31,18 @@
 //!     PDUSessionResourceSetupRequest; this project models the former,
 //!     matching how `s1ap`'s ICSR carries the initial E-RAB(s)).
 //!
-//! PER wire encoding for all five messages here (`InitialUeMessage`/
-//! `Uplink`/`DownlinkNasTransport`/`InitialContextSetupRequest`/`Response`)
-//! is implemented in `ngap::codec`. Everything else in this file
-//! (`NgSetup*`, `PduSessionResourceSetup*`, `UeContextRelease*`) is struct-
-//! only — no codec yet.
+//! PER wire encoding for all seven messages here (`InitialUeMessage`/
+//! `Uplink`/`DownlinkNasTransport`/`InitialContextSetupRequest`/`Response`/
+//! `UeContextReleaseCommand`/`Complete`) is implemented in `ngap::codec`.
+//! `NgSetup*`/`PduSessionResourceSetup*` remain struct-only — no codec yet.
+//!
+//!   - `UeContextReleaseCommand` gained `amf_ue_ngap_id`/`ran_ue_ngap_id`
+//!     (multi-UE support): real NGAP disambiguates the target UE via
+//!     `UE-NGAP-IDs`, a CHOICE of `UE-NGAP-ID-pair`/`AMF-UE-NGAP-ID`; this
+//!     models it as the same flat mandatory pair `Complete` already used,
+//!     not the CHOICE — consistent with the rest of this codec's
+//!     simplifications (flattened `Cause`, etc.), not a correctness gap for
+//!     what this project drives.
 
 use bytes::Bytes;
 
@@ -74,8 +81,9 @@ pub enum NgapMessage {
     PduSessionResourceSetupFailure,
 
     // ── Release ───────────────────────────────────────────────────────────
-    /// AMF → gNodeB: release UE context.
-    UeContextReleaseCommand { cause: NgapCause },
+    /// AMF → gNodeB: release UE context. `amf_ue_ngap_id`/`ran_ue_ngap_id`
+    /// identify which UE — see module doc's multi-UE note.
+    UeContextReleaseCommand { amf_ue_ngap_id: u32, ran_ue_ngap_id: u32, cause: NgapCause },
     /// gNodeB → AMF: context released.
     UeContextReleaseComplete(NgapUeContextReleaseComplete),
 }

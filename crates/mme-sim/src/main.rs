@@ -599,16 +599,16 @@ async fn run_ue(bind_addr: SocketAddr, mme_addr: SocketAddr) -> Result<(), Box<d
                 println!("[UE ] -> DetachRequest");
             }
 
-            S1apMessage::UeContextReleaseCommand { cause } => {
-                println!("[UE ] <- UeContextReleaseCommand (cause={cause:?})");
-                // No UE-ID IE on this message in this codebase's simplified
-                // encoding (see s1ap::codec's own doc) — this simulation
-                // only ever has one UE per socket, so the MME-UE-S1AP-ID
-                // learned earlier in this same run is unambiguous.
-                let mme_ue_s1ap_id = mme_ue_s1ap_id
-                    .ok_or("received UeContextReleaseCommand before MME-UE-S1AP-ID was known")?;
+            S1apMessage::UeContextReleaseCommand { mme_ue_s1ap_id: cmd_mme_id, enb_ue_s1ap_id: cmd_enb_id, cause } => {
+                println!(
+                    "[UE ] <- UeContextReleaseCommand (mme_ue_s1ap_id={cmd_mme_id}, enb_ue_s1ap_id={cmd_enb_id}, cause={cause:?})"
+                );
+                // UeContextReleaseCommand now carries real MME-UE-S1AP-ID/
+                // eNB-UE-S1AP-ID (multi-UE support) — echo exactly what the
+                // MME sent rather than the locally-tracked ID, which also
+                // verifies the MME targeted the right UE.
                 let complete = S1apMessage::UeContextReleaseComplete(UeContextReleaseComplete {
-                    mme_ue_s1ap_id, enb_ue_s1ap_id: ENB_UE_S1AP_ID,
+                    mme_ue_s1ap_id: cmd_mme_id, enb_ue_s1ap_id: cmd_enb_id,
                 });
                 link.send(encode_s1ap_pdu(&complete)?).await?;
                 println!("[UE ] -> UeContextReleaseComplete");

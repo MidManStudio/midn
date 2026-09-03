@@ -636,16 +636,16 @@ async fn run_ue(bind_addr: SocketAddr, amf_addr: SocketAddr) -> Result<(), Box<d
                 println!("[UE ] -> DeregistrationRequest");
             }
 
-            NgapMessage::UeContextReleaseCommand { cause } => {
-                println!("[UE ] <- UeContextReleaseCommand (cause={cause:?})");
-                // No UE-ID IE on this message in this codebase's simplified
-                // encoding (see ngap::codec's own doc) — this simulation
-                // only ever has one UE per socket, so the AMF-UE-NGAP-ID
-                // learned earlier in this same run is unambiguous.
-                let amf_ue_ngap_id = amf_ue_ngap_id
-                    .ok_or("received UeContextReleaseCommand before AMF-UE-NGAP-ID was known")?;
+            NgapMessage::UeContextReleaseCommand { amf_ue_ngap_id: cmd_amf_id, ran_ue_ngap_id: cmd_ran_id, cause } => {
+                println!(
+                    "[UE ] <- UeContextReleaseCommand (amf_ue_ngap_id={cmd_amf_id}, ran_ue_ngap_id={cmd_ran_id}, cause={cause:?})"
+                );
+                // UeContextReleaseCommand now carries real AMF-UE-NGAP-ID/
+                // RAN-UE-NGAP-ID (multi-UE support) — echo exactly what the
+                // AMF sent rather than the locally-tracked ID, which also
+                // verifies the AMF targeted the right UE.
                 let complete = NgapMessage::UeContextReleaseComplete(NgapUeContextReleaseComplete {
-                    amf_ue_ngap_id, ran_ue_ngap_id: RAN_UE_NGAP_ID,
+                    amf_ue_ngap_id: cmd_amf_id, ran_ue_ngap_id: cmd_ran_id,
                 });
                 link.send(encode_ngap_pdu(&complete)?).await?;
                 println!("[UE ] -> UeContextReleaseComplete");

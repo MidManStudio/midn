@@ -78,7 +78,9 @@ pub fn handle_deregistration_request(
         }));
     }
 
-    out.push(NgapMessage::UeContextReleaseCommand { cause: NgapCause::NasDeregister });
+    out.push(NgapMessage::UeContextReleaseCommand {
+        amf_ue_ngap_id, ran_ue_ngap_id, cause: NgapCause::NasDeregister,
+    });
 
     tracing::info!(
         amf_ue_ngap_id, switch_off,
@@ -115,7 +117,8 @@ mod tests {
         assert!(matches!(out[0], NgapMessage::DownlinkNasTransport(_)));
         assert!(matches!(
             out[1],
-            NgapMessage::UeContextReleaseCommand { cause: NgapCause::NasDeregister }
+            NgapMessage::UeContextReleaseCommand { amf_ue_ngap_id, ran_ue_ngap_id: 1, cause: NgapCause::NasDeregister }
+            if amf_ue_ngap_id == entity
         ));
     }
 
@@ -128,7 +131,8 @@ mod tests {
         assert_eq!(out.len(), 1, "switch-off skips DeregistrationAccept");
         assert!(matches!(
             out[0],
-            NgapMessage::UeContextReleaseCommand { cause: NgapCause::NasDeregister }
+            NgapMessage::UeContextReleaseCommand { amf_ue_ngap_id, ran_ue_ngap_id: 1, cause: NgapCause::NasDeregister }
+            if amf_ue_ngap_id == entity
         ));
     }
 

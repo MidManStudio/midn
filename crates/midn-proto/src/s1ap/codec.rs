@@ -646,13 +646,27 @@ fn decode_initial_context_setup_response(entries: &[IeEntry]) -> Result<S1apMess
 
 // ── UeContextReleaseCommand / Complete ─────────────────────────────────────────
 // Class-1 (id-UEContextRelease, ProcedureCode=23), same PDU-choice threading
-// as InitialContextSetupRequest/Response above. Same single-UE-per-socket
-// simplification `ngap::codec`'s equivalent doc states — no UE-ID IE
-// modeled here since this simulation never has ambiguity about which UE a
-// release command is for.
+// as InitialContextSetupRequest/Response above.
+//
+// UeContextReleaseCommand now carries MME-UE-S1AP-ID/eNB-UE-S1AP-ID
+// (multi-UE support) — mirrors `ngap::codec`'s identical addition; see that
+// module's equivalent comment for the flat-pair-vs-CHOICE simplification
+// note, which applies here unchanged.
 
-pub fn encode_ue_context_release_command(cause: S1apCause) -> Bytes {
-    let mut entries: Vec<IeEntry> = Vec::with_capacity(1);
+pub fn encode_ue_context_release_command(
+    mme_ue_s1ap_id: u32, enb_ue_s1ap_id: u32, cause: S1apCause,
+) -> Bytes {
+    let mut entries: Vec<IeEntry> = Vec::with_capacity(3);
+    {
+        let mut w = PerWriter::new();
+        w.write_constrained_int(mme_ue_s1ap_id as u64, 0, ie::MME_UE_S1AP_ID_MAX);
+        entries.push((ie::ID_MME_UE_S1AP_ID, ie::CRITICALITY_REJECT, w.into_bytes()));
+    }
+    {
+        let mut w = PerWriter::new();
+        w.write_constrained_int(enb_ue_s1ap_id as u64, 0, ie::ENB_UE_S1AP_ID_MAX);
+        entries.push((ie::ID_ENB_UE_S1AP_ID, ie::CRITICALITY_REJECT, w.into_bytes()));
+    }
     {
         let mut w = PerWriter::new();
         w.write_constrained_int(s1ap_cause_to_u64(cause), 0, ie::CAUSE_MAX);
@@ -669,14 +683,29 @@ pub fn encode_ue_context_release_command(cause: S1apCause) -> Bytes {
 }
 
 fn decode_ue_context_release_command(entries: &[IeEntry]) -> Result<S1apMessage> {
+    let mut mme_ue_s1ap_id = None;
+    let mut enb_ue_s1ap_id = None;
     let mut cause = None;
     for (id, _crit, val) in entries {
-        if *id == ie::ID_CAUSE {
-            let mut r = PerReader::new(val);
-            cause = r.read_constrained_int(0, ie::CAUSE_MAX).and_then(s1ap_cause_from_u64);
+        let mut r = PerReader::new(val);
+        match *id {
+            x if x == ie::ID_MME_UE_S1AP_ID => {
+                mme_ue_s1ap_id = r.read_constrained_int(0, ie::MME_UE_S1AP_ID_MAX).map(|v| v as u32);
+            }
+            x if x == ie::ID_ENB_UE_S1AP_ID => {
+                enb_ue_s1ap_id = r.read_constrained_int(0, ie::ENB_UE_S1AP_ID_MAX).map(|v| v as u32);
+            }
+            x if x == ie::ID_CAUSE => {
+                cause = r.read_constrained_int(0, ie::CAUSE_MAX).and_then(s1ap_cause_from_u64);
+            }
+            _ => {}
         }
     }
     Ok(S1apMessage::UeContextReleaseCommand {
+        mme_ue_s1ap_id: mme_ue_s1ap_id
+            .ok_or(ProtoError::MalformedS1ap { reason: "missing MME-UE-S1AP-ID" })?,
+        enb_ue_s1ap_id: enb_ue_s1ap_id
+            .ok_or(ProtoError::MalformedS1ap { reason: "missing eNB-UE-S1AP-ID" })?,
         cause: cause.ok_or(ProtoError::MalformedS1ap { reason: "missing or invalid Cause" })?,
     })
 }
@@ -741,7 +770,8 @@ pub fn encode_s1ap_pdu(msg: &S1apMessage) -> Result<Bytes> {
         S1apMessage::DownlinkNasTransport(m) => Ok(encode_downlink_nas_transport(m)),
         S1apMessage::InitialContextSetupRequest(m) => Ok(encode_initial_context_setup_request(m)),
         S1apMessage::InitialContextSetupResponse(m) => Ok(encode_initial_context_setup_response(m)),
-        S1apMessage::UeContextReleaseCommand { cause } => Ok(encode_ue_context_release_command(*cause)),
+        S1apMessage::UeContextReleaseCommand { mme_ue_s1ap_id, enb_ue_s1ap_id, cause } =>
+            Ok(encode_ue_context_release_command(*mme_ue_s1ap_id, *enb_ue_s1ap_id, *cause)),
         S1apMessage::UeContextReleaseComplete(m) => Ok(encode_ue_context_release_complete(m)),
         _ => Err(ProtoError::MalformedS1ap {
             reason: "PER encoding not yet implemented for this S1AP message — \
@@ -1022,12 +1052,52 @@ mod tests {
             S1apCause::ProtocolUnspecified,
             S1apCause::MiscUnspecified,
         ] {
-            let bytes = encode_s1ap_pdu(&S1apMessage::UeContextReleaseCommand { cause }).unwrap();
+            let bytes = encode_s1ap_pdu(&S1apMessage::UeContextReleaseCommand {
+                mme_ue_s1ap_id: 42, enb_ue_s1ap_id: 9, cause,
+            }).unwrap();
             match decode_s1ap_pdu(&bytes).unwrap() {
-                S1apMessage::UeContextReleaseCommand { cause: d } => assert_eq!(d, cause),
+                S1apMessage::UeContextReleaseCommand { mme_ue_s1ap_id, enb_ue_s1ap_id, cause: d } => {
+                    assert_eq!(mme_ue_s1ap_id, 42);
+                    assert_eq!(enb_ue_s1ap_id, 9);
+                    assert_eq!(d, cause);
+                }
                 other => panic!("wrong variant decoded: {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn ue_context_release_command_ue_id_round_trip_distinguishes_ids() {
+        // Regression coverage for the multi-UE fix: MME-UE-S1AP-ID and
+        // eNB-UE-S1AP-ID must survive as the DISTINCT values they were
+        // encoded with, not get swapped or collapsed to one field.
+        let bytes = encode_s1ap_pdu(&S1apMessage::UeContextReleaseCommand {
+            mme_ue_s1ap_id: 0xCAFEBABE, enb_ue_s1ap_id: 7, cause: S1apCause::NasDetach,
+        }).unwrap();
+        match decode_s1ap_pdu(&bytes).unwrap() {
+            S1apMessage::UeContextReleaseCommand { mme_ue_s1ap_id, enb_ue_s1ap_id, .. } => {
+                assert_eq!(mme_ue_s1ap_id, 0xCAFEBABE);
+                assert_eq!(enb_ue_s1ap_id, 7);
+            }
+            other => panic!("wrong variant decoded: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ue_context_release_command_rejects_missing_ue_id() {
+        // A hand-built PDU carrying only Cause (the pre-multi-UE shape)
+        // must now fail decode rather than silently defaulting the IDs.
+        let mut entries: Vec<IeEntry> = Vec::with_capacity(1);
+        let mut w = PerWriter::new();
+        w.write_constrained_int(s1ap_cause_to_u64(S1apCause::NasDetach), 0, ie::CAUSE_MAX);
+        entries.push((ie::ID_CAUSE, ie::CRITICALITY_IGNORE, w.into_bytes()));
+        let mut value_w = PerWriter::new();
+        write_ie_container(&mut value_w, &entries);
+        let bytes = encode_pdu_wrapper(
+            PDU_CHOICE_INITIATING_MESSAGE, ie::PROC_UE_CONTEXT_RELEASE, ie::CRITICALITY_IGNORE,
+            &value_w.into_bytes(),
+        );
+        assert!(decode_s1ap_pdu(&bytes).is_err(), "missing UE-ID IEs must be a decode error");
     }
 
     #[test]
@@ -1045,7 +1115,9 @@ mod tests {
 
     #[test]
     fn ue_context_release_command_and_complete_share_procedure_code_but_not_choice() {
-        let cmd = S1apMessage::UeContextReleaseCommand { cause: S1apCause::NasDetach };
+        let cmd = S1apMessage::UeContextReleaseCommand {
+            mme_ue_s1ap_id: 1, enb_ue_s1ap_id: 1, cause: S1apCause::NasDetach,
+        };
         let complete = S1apMessage::UeContextReleaseComplete(UeContextReleaseComplete {
             mme_ue_s1ap_id: 1, enb_ue_s1ap_id: 1,
         });

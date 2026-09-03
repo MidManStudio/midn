@@ -1,5 +1,10 @@
 // crates/midn-proto/src/s1ap/messages.rs
 //! S1AP message definitions — 3GPP TS 36.413.
+//!
+//! `UeContextReleaseCommand` carries `mme_ue_s1ap_id`/`enb_ue_s1ap_id`
+//! (multi-UE support) — mirrors `ngap::messages`'s identical addition to
+//! `NgapMessage::UeContextReleaseCommand`; see that module's doc for the
+//! flat-pair-vs-CHOICE simplification note, which applies here unchanged.
 
 use bytes::Bytes;
 
@@ -22,7 +27,7 @@ pub enum S1apMessage {
     InitialContextSetupFailure { cause: S1apCause },
 
     // ── Release ───────────────────────────────────────────────────────────
-    UeContextReleaseCommand { cause: S1apCause },
+    UeContextReleaseCommand { mme_ue_s1ap_id: u32, enb_ue_s1ap_id: u32, cause: S1apCause },
     /// Tuple variant — handler receives the struct by value.
     UeContextReleaseComplete(UeContextReleaseComplete),
 }
