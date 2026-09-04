@@ -585,7 +585,11 @@ mod tests {
         let (resp, events) = amf.process_ngap(uplink(ran_ue_ngap_id, amf_ue_ngap_id, deregistration_pdu)).await;
         assert_eq!(resp.len(), 2, "expect DeregistrationAccept + UeContextReleaseCommand");
         assert!(matches!(resp[0], NgapMessage::DownlinkNasTransport(_)));
-        assert!(matches!(resp[1], NgapMessage::UeContextReleaseCommand { cause: NgapCause::NasDeregister }));
+        assert!(matches!(
+            resp[1],
+            NgapMessage::UeContextReleaseCommand { amf_ue_ngap_id: a, ran_ue_ngap_id: r, cause: NgapCause::NasDeregister }
+            if a == amf_ue_ngap_id && r == ran_ue_ngap_id
+        ));
         assert!(events.is_empty(), "no N3Event until UeContextReleaseComplete");
 
         let release_complete = NgapMessage::UeContextReleaseComplete(NgapUeContextReleaseComplete {

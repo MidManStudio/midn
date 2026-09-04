@@ -1142,7 +1142,9 @@ mod tests {
         // UeContextReleaseCommand, which this test used to check here before
         // gaining real codec support this session.
         let result = encode_s1ap_pdu(&S1apMessage::S1SetupRequest(
-            crate::s1ap::messages::S1SetupRequest { global_enb_id: [0u8; 8], enb_name: None, supported_tas: vec![] },
+            crate::s1ap::messages::S1SetupRequest {
+                global_enb_id: [0u8; 8], enb_name: None, supported_tas: vec![], default_paging_drx: 0,
+            },
         ));
         assert!(result.is_err(), "out-of-scope variants must error, not silently mis-encode");
     }
