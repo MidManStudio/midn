@@ -522,12 +522,32 @@ pub fn handle_security_mode_complete(
             imsi,
             pdu_session_id: DEFAULT_PDU_SESSION_ID,
             qfi: DEFAULT_QFI,
-            // No UE IP allocator exists for either RAT in this simulation —
-            // mme::attach's own `ue_ip` is the same permanent [0;4]
-            // placeholder in practice (see that module's `start_attach`).
+            // No real UE IP allocator exists in this simulation, but the
+            // value still has to be genuinely unique per UE now that
+            // multi-UE support exists: `RoutingTable::dl_map` (midn-
+            // userplane) is keyed BY ue_ip, so every session sharing the
+            // old fixed [0;4] placeholder collided in that map — the
+            // newest registration's entry silently overwrote the
+            // previous one's, and either UE's teardown (RemoveSession)
+            // could then delete whichever entry currently held that
+            // shared key, not necessarily its own. Synthesizing a fake
+            // but unique address from `amf_ue_ngap_id` (itself unique by
+            // construction — see amf::state_machine's entity allocation)
+            // costs nothing here and removes the collision outright.
+            // 10.45.0.0/16 is an arbitrary private-range choice with no
+            // other meaning — nothing routes on it, it only ever exists
+            // as a RoutingTable/HashMap key.
+            //
+            // mme::attach's own `ue_ip` resolves to the same shared
+            // placeholder in practice today (see that module's
+            // `start_attach`) — same latent collision, not yet fixed
+            // there: no LTE multi-UE workflow exercises it yet, and the
+            // fix shape is different there (a stored fallback threaded
+            // through from an earlier function, not one literal at the
+            // call site) — flagging rather than changing blind.
             // gnb_addr fills in once InitialContextSetupResponse arrives —
             // see state_machine::Amf::handle_ics_response.
-            ue_ip: [0; 4],
+            ue_ip: [10, 45, (amf_ue_ngap_id >> 8) as u8, amf_ue_ngap_id as u8],
             gnb_addr: [0; 4],
         };
         (vec![icsr], vec![evt])
