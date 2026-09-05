@@ -1,0 +1,243 @@
+# .github/workflows/midn-sim-multi-ue-smoke-test.yml
+#
+# The actual multi-UE proof. `midn-sim-smoke-test.yml` (this file's
+# single-UE sibling) only ever calls `--n-ues 1` implicitly — a green run
+# there proves the gNB multiplexer introduced no regression, not that
+# multi-UE itself works. This workflow is that missing piece: `--n-ues 2`
+# on both `--role amf` and `--role ue`, two logical UEs sharing ONE real
+# SCTP association and ONE real GTP-U socket, the way one real gNB's do.
+#
+# Deliberately its own file rather than a second job bolted onto
+# `midn-sim-smoke-test.yml` — same reasoning that file already gives for
+# staying separate from `midn-test.yml`: newer, riskier, isolated blast
+# radius. The already-green single-UE workflow is not touched by this one
+# at all.
+#
+# What actually gets checked, beyond mirroring the single-UE checks per UE:
+#   - Both logical UEs' IMSIs appear distinctly in the AMF's own
+#     `N3Event::CreateSession` log lines (901700000001 / 901700000002) —
+#     proof the AMF really did process two distinct subscribers, not one
+#     UE's traffic duplicated or looped.
+#   - The dispatcher's own cross-UE routing regression check (added
+#     alongside the multiplexer itself, in `run_one_ue`) never fires — its
+#     error text ("to the wrong UE task") must be ABSENT from ue.log. That
+#     check exists specifically to catch the demux misrouting one UE's
+#     message to the other; this asserts it never had to.
+
+name: midn-sim — netns Multi-UE Smoke Test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RUN_TIMEOUT_SECONDS: 30
+  AMF_ADDR: 10.99.0.1
+  UE_ADDR: 10.99.0.2
+  AMF_PORT: 38412
+  N_UES: 2
+
+jobs:
+  netns-multi-ue-smoke-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Get Rust version
+        id: rustver
+        run: echo "ver=$(rustc --version)" >> $GITHUB_OUTPUT
+
+      # Same key prefix midn-test.yml / midn-sim-smoke-test.yml use — reuses
+      # whatever any of those already downloaded.
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: cargo-registry-midn-sim-${{ hashFiles('crates/midn-transport/Cargo.toml', 'crates/midn-sim/Cargo.toml') }}
+          restore-keys: |
+            cargo-registry-midn-sim-
+            cargo-registry-midn-
+            cargo-registry-
+
+      - name: Build midn-sim
+        run: cargo build -p midn-sim --release
+
+      - name: Set up netns + veth pair
+        run: |
+          set -e
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq iproute2 iputils-ping
+
+          sudo ip netns add ns-amf
+          sudo ip netns add ns-ue
+
+          sudo ip link add veth-amf type veth peer name veth-ue
+          sudo ip link set veth-amf netns ns-amf
+          sudo ip link set veth-ue netns ns-ue
+
+          sudo ip netns exec ns-amf ip addr add ${AMF_ADDR}/30 dev veth-amf
+          sudo ip netns exec ns-ue  ip addr add ${UE_ADDR}/30  dev veth-ue
+
+          sudo ip netns exec ns-amf ip link set veth-amf up
+          sudo ip netns exec ns-ue  ip link set veth-ue up
+          sudo ip netns exec ns-amf ip link set lo up
+          sudo ip netns exec ns-ue  ip link set lo up
+
+          echo "--- ns-amf ---"
+          sudo ip netns exec ns-amf ip -4 addr show veth-amf
+          echo "--- ns-ue ---"
+          sudo ip netns exec ns-ue  ip -4 addr show veth-ue
+
+      - name: Verify veth connectivity (ping ns-ue -> ns-amf)
+        run: |
+          sudo ip netns exec ns-ue ping -c 2 -W 2 "${AMF_ADDR}" \
+            > veth-ping.log 2>&1 || true
+          cat veth-ping.log
+
+      # Same background-process shape as midn-sim-smoke-test.yml — see that
+      # file's own comment on the PID-file handoff to the teardown step.
+      - name: Run midn-sim across the namespace boundary (--n-ues 2)
+        run: |
+          sudo ip netns exec ns-amf \
+            ./target/release/midn-sim --role amf --bind "${AMF_ADDR}:${AMF_PORT}" --n-ues "${N_UES}" \
+            > amf.log 2>&1 &
+          echo $! > amf.pid
+          disown
+
+          sleep 1
+
+          timeout "${RUN_TIMEOUT_SECONDS}"s \
+            sudo ip netns exec ns-ue \
+            ./target/release/midn-sim --role ue --bind "${UE_ADDR}:0" --amf "${AMF_ADDR}:${AMF_PORT}" --n-ues "${N_UES}" \
+            > ue.log 2>&1 || true
+
+          # Two logical UEs' worth of sends fire-and-forget before the gNB
+          # process exits — same drain-delay reasoning as the single-UE
+          # workflow, doubled, since there's twice as much in flight at the
+          # tail end (both UEs' last DeregistrationComplete/UeContextRelease
+          # exchanges).
+          sleep 2
+
+      - name: Tear down netns + veth pair
+        if: always()
+        run: |
+          if [ -f amf.pid ]; then
+            sudo kill "$(cat amf.pid)" 2>/dev/null || true
+          fi
+          sudo pkill -f "midn-sim --role amf" 2>/dev/null || true
+
+          sudo ip netns delete ns-amf 2>/dev/null || true
+          sudo ip netns delete ns-ue 2>/dev/null || true
+
+      - name: Check both logical UEs actually completed, write job summary
+        if: always()
+        run: |
+          python3 - << 'PYEOF'
+          import os
+
+          def read_or(path):
+              try:
+                  with open(path) as f:
+                      return f.read()
+              except FileNotFoundError:
+                  return None
+
+          ping_log = read_or('veth-ping.log')
+          amf_log = read_or('amf.log')
+          ue_log = read_or('ue.log')
+
+          # (label, log, required substring) for the shared/gNB-level part
+          # of the run, then per-UE checks for UE1 and UE2 each, generated
+          # below rather than duplicated by hand.
+          checks = [
+              ("netns+veth: ns-ue reached ns-amf over the veth pair (ping)", ping_log, "0% packet loss"),
+              ("AMF: bound the real veth IP, not loopback",     amf_log, f"binding {os.environ['AMF_ADDR']}:{os.environ['AMF_PORT']}"),
+              ("AMF: SCTP association established",             amf_log, "[AMF] SCTP association established"),
+              ("gNB: SCTP association established",             ue_log,  "[gNB] SCTP association established"),
+              ("UPF: GTP-U forwarder listening",                amf_log, "GTP-U forwarder listening"),
+              # Both IMSIs distinctly provisioned+processed — real proof
+              # the AMF handled two distinct subscribers, not one UE's
+              # traffic duplicated. TEST_IMSI + {0,1} from midn-sim's own
+              # constants (see its module doc).
+              ("AMF: processed UE1's subscriber (imsi 901700000001)", amf_log, "imsi: 901700000001"),
+              ("AMF: processed UE2's subscriber (imsi 901700000002)", amf_log, "imsi: 901700000002"),
+          ]
+
+          for n in (1, 2):
+              tag = f"[UE{n}]"
+              checks += [
+                  (f"UE{n}: sent RegistrationRequest",              ue_log, f"{tag} -> RegistrationRequest"),
+                  (f"UE{n}: sent IdentityResponse(SUCI)",            ue_log, f"{tag} -> IdentityResponse(SUCI)"),
+                  (f"UE{n}: sent AuthenticationResponse (RES*)",     ue_log, f"{tag} -> AuthenticationResponse(RES*)"),
+                  (f"UE{n}: sent SecurityModeComplete",              ue_log, f"{tag} -> SecurityModeComplete"),
+                  (f"UE{n}: decrypted RegistrationAccept",           ue_log, f"{tag} <- RegistrationAccept"),
+                  (f"UE{n}: sent InitialContextSetupResponse",       ue_log, f"{tag} -> InitialContextSetupResponse"),
+                  (f"UE{n}: registration complete",                  ue_log, f"{tag} registration complete"),
+                  (f"UE{n}: sent uplink G-PDU",                      ue_log, f"{tag} -> G-PDU UL"),
+                  (f"UE{n}: user-plane round trip confirmed",        ue_log, f"{tag} user-plane G-PDU round trip confirmed"),
+                  (f"UE{n}: sent DeregistrationRequest",             ue_log, f"{tag} -> DeregistrationRequest"),
+                  (f"UE{n}: decrypted DeregistrationAccept",         ue_log, f"{tag} <- DeregistrationAccept"),
+                  (f"UE{n}: sent UeContextReleaseComplete",          ue_log, f"{tag} -> UeContextReleaseComplete"),
+                  (f"UE{n}: deregistration complete",                ue_log, f"{tag} deregistration complete"),
+              ]
+
+          results = [(label, log is not None and needle in log) for label, log, needle in checks]
+
+          # Negative check: the dispatcher's own cross-UE routing guard
+          # (run_one_ue, right after `ngap_rx.recv()`) must never have
+          # fired. Appended after the positive checks, not before, so a
+          # missing ue.log still reports every positive check as its own
+          # clear ❌ instead of this one masking them.
+          no_misroute = ue_log is not None and "to the wrong UE task" not in ue_log
+          results.append(("No cross-UE misrouting detected (dispatcher demux guard never fired)", no_misroute))
+
+          all_ok = all(ok for _, ok in results)
+
+          lines = []
+          lines.append("## midn-sim netns Multi-UE Smoke Test (--n-ues 2)")
+          lines.append("")
+          lines.append(
+              "### ✅ Two logical UEs, one shared SCTP association + GTP-U socket, both full lifecycles confirmed"
+              if all_ok else "### ❌ Exchange incomplete"
+          )
+          lines.append("")
+          lines.append("| Check | Result |")
+          lines.append("|---|---|")
+          for label, ok in results:
+              lines.append(f"| {label} | {'✅' if ok else '❌'} |")
+          lines.append("")
+          lines.append("<details><summary>veth-ping.log</summary>\n")
+          lines.append("```")
+          lines.append((ping_log or "(missing — step never produced a log file)").strip())
+          lines.append("```")
+          lines.append("</details>")
+          lines.append("")
+          lines.append("<details><summary>amf.log</summary>\n")
+          lines.append("```")
+          lines.append((amf_log or "(missing — step never produced a log file)").strip())
+          lines.append("```")
+          lines.append("</details>")
+          lines.append("")
+          lines.append("<details><summary>ue.log</summary>\n")
+          lines.append("```")
+          lines.append((ue_log or "(missing — step never produced a log file)").strip())
+          lines.append("```")
+          lines.append("</details>")
+
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+              f.write("\n".join(lines) + "\n")
+
+          if not all_ok:
+              raise SystemExit(1)
+          PYEOF
